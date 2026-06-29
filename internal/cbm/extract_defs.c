@@ -5126,14 +5126,35 @@ static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
     }
 }
 
+// Deepest attrset/let nesting at which a binding is still treated as a meaningful
+// symbol. Beyond this you are inside mkOption internals (type/description/default)
+// and deep config-value leaves (launchd plists, program settings) rather than named
+// defs worth indexing; the cap keeps the symbol set signal-dense and bounds the node
+// count on large, deeply-nested configurations.
+enum { NIX_MAX_BINDING_ATTRSET_DEPTH = 4 };
+
+// Count a node's enclosing attrset / let-expression ancestors (its nesting depth).
+static int nix_binding_attrset_depth(TSNode n) {
+    int depth = 0;
+    for (TSNode p = ts_node_parent(n); !ts_node_is_null(p); p = ts_node_parent(p)) {
+        const char *t = ts_node_type(p);
+        if (strcmp(t, "attrset_expression") == 0 || strcmp(t, "rec_attrset_expression") == 0 ||
+            strcmp(t, "let_expression") == 0 || strcmp(t, "let_attrset_expression") == 0) {
+            depth++;
+        }
+    }
+    return depth;
+}
+
 // Nix: bindings (`attrpath = expr;`) carry their name on the `attrpath` field and
 // nest arbitrarily deep inside attrsets / let-expressions, so the top-level-only
 // walk below never reaches them. Walk the whole tree and emit a Variable per
-// binding, named by its attrpath text (`options.kriswill.<x>.enable`, the full
-// path being the useful identifier for option declarations). Bindings whose value
-// is a function_expression are left to the function extractor (resolved by name
-// from the same binding in resolve_func_name / walk_defs) so a def is not counted
-// as both a Function and a Variable.
+// binding (up to NIX_MAX_BINDING_ATTRSET_DEPTH), named by its attrpath text
+// (`options.kriswill.<x>.enable`, the full path being the useful identifier for
+// option declarations). Bindings whose value is a function_expression are left to
+// the function extractor (resolved by name from the same binding in
+// resolve_func_name / walk_defs) so a def is not counted as both Function and
+// Variable.
 static void walk_nix_bindings(CBMExtractCtx *ctx, TSNode root) {
     CBMArena *a = ctx->arena;
     TSNodeStack stack;
@@ -5142,7 +5163,8 @@ static void walk_nix_bindings(CBMExtractCtx *ctx, TSNode root) {
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
-        if (strcmp(ts_node_type(node), "binding") == 0) {
+        if (strcmp(ts_node_type(node), "binding") == 0 &&
+            nix_binding_attrset_depth(node) <= NIX_MAX_BINDING_ATTRSET_DEPTH) {
             TSNode val = ts_node_child_by_field_name(node, TS_FIELD("expression"));
             bool is_func =
                 !ts_node_is_null(val) && strcmp(ts_node_type(val), "function_expression") == 0;
