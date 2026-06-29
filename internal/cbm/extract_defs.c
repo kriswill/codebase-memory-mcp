@@ -6013,10 +6013,15 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
                 // Ada subprograms nest (a procedure body's declarative part can
                 // contain inner subprogram bodies); descend so the nested defs
                 // are captured and same-file calls to them resolve to a CALLS edge.
+                // Nix lambdas nest: a file-level `{ ... }:` module-args lambda wraps a
+                // body whose bindings are themselves lambdas (e.g. flake-parts /
+                // dendritic `flake.modules.darwin.<name> = { ... }: { ... }`). Without
+                // descending, the outer lambda is the only function_expression visited
+                // and the named inner ones (resolved above) are never reached.
                 bool descend_into_func =
                     (ctx->language == CBM_LANG_WOLFRAM || ctx->language == CBM_LANG_TYPESCRIPT ||
                      ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TSX ||
-                     ctx->language == CBM_LANG_ADA);
+                     ctx->language == CBM_LANG_ADA || ctx->language == CBM_LANG_NIX);
                 if (!descend_into_func) {
                     continue;
                 }
