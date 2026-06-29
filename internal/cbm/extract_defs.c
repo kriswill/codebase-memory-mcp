@@ -5124,8 +5124,51 @@ static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
     }
 }
 
+// Nix: bindings (`attrpath = expr;`) carry their name on the `attrpath` field and
+// nest arbitrarily deep inside attrsets / let-expressions, so the top-level-only
+// walk below never reaches them. Walk the whole tree and emit a Variable per
+// binding, named by its attrpath text (`options.kriswill.<x>.enable`, the full
+// path being the useful identifier for option declarations). Bindings whose value
+// is a function_expression are left to the function extractor (resolved by name
+// from the same binding in resolve_func_name / walk_defs) so a def is not counted
+// as both a Function and a Variable.
+static void walk_nix_bindings(CBMExtractCtx *ctx, TSNode root) {
+    CBMArena *a = ctx->arena;
+    TSNodeStack stack;
+    ts_nstack_init(&stack, ctx->arena, CBM_SZ_256);
+    ts_nstack_push(&stack, ctx->arena, root);
+
+    while (stack.count > 0) {
+        TSNode node = ts_nstack_pop(&stack);
+        if (strcmp(ts_node_type(node), "binding") == 0) {
+            TSNode val = ts_node_child_by_field_name(node, TS_FIELD("expression"));
+            bool is_func =
+                !ts_node_is_null(val) && strcmp(ts_node_type(val), "function_expression") == 0;
+            if (!is_func) {
+                TSNode attrpath = ts_node_child_by_field_name(node, TS_FIELD("attrpath"));
+                if (!ts_node_is_null(attrpath)) {
+                    push_var_def(ctx, cbm_node_text(a, attrpath, ctx->source), node);
+                }
+            }
+        }
+        uint32_t count = ts_node_child_count(node);
+        for (int i = (int)count - SKIP_CHAR; i >= 0; i--) {
+            TSNode child = ts_node_child(node, (uint32_t)i);
+            if (!ts_node_is_null(child)) {
+                ts_nstack_push(&stack, ctx->arena, child);
+            }
+        }
+    }
+}
+
 static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     if (!spec->variable_node_types || !spec->variable_node_types[0]) {
+        return;
+    }
+
+    // Nix: bindings nest inside attrsets/let-expressions; walk the whole tree.
+    if (ctx->language == CBM_LANG_NIX) {
+        walk_nix_bindings(ctx, root);
         return;
     }
 
