@@ -791,16 +791,18 @@ TSNode cbm_resolve_func_name(TSNode node, CBMLanguage lang) {
         /* Nix: a named function is a `function_expression` (lambda `x: body`) with
          * no name of its own — the binding name lives on the enclosing `binding`'s
          * `attrpath` field (`name = x: ...`). Resolve through the parent binding to
-         * the attrpath's `attr` identifier so `addOne = x: ...` mints a Function
-         * def. A lambda whose parent is not a binding (e.g. an inline `map (x: x)`
-         * argument) resolves null and stays out of func_types. */
+         * the whole attrpath so `addOne = x: ...` mints `addOne` and a dotted path
+         * like `flake.modules.darwin.kitty = { ... }: ...` stays distinct as
+         * `flake.modules.darwin.kitty` — returning only the first `attr` would
+         * collapse every such def to `flake`. A lambda whose parent is not a binding
+         * (e.g. an inline `map (x: x)` argument) resolves null and stays out of
+         * func_types. */
         if (lang == CBM_LANG_NIX && strcmp(kind, "function_expression") == 0) {
             TSNode parent = ts_node_parent(node);
             if (!ts_node_is_null(parent) && strcmp(ts_node_type(parent), "binding") == 0) {
                 TSNode attrpath = ts_node_child_by_field_name(parent, TS_FIELD("attrpath"));
                 if (!ts_node_is_null(attrpath)) {
-                    TSNode attr = ts_node_child_by_field_name(attrpath, TS_FIELD("attr"));
-                    return ts_node_is_null(attr) ? attrpath : attr;
+                    return attrpath;
                 }
             }
         }
