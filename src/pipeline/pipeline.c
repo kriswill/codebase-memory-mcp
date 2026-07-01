@@ -628,6 +628,9 @@ static void predump_flakelock(cbm_pipeline_ctx_t *ctx) {
 static void predump_nix_eval(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_pass_nix_eval(ctx);
 }
+static void predump_nixoptions(cbm_pipeline_ctx_t *ctx) {
+    cbm_pipeline_pass_nixoptions(ctx);
+}
 
 static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
     static const struct {
@@ -635,12 +638,13 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
         const char *name;
         bool moderate_only; /* true = skip in fast mode */
     } passes[] = {
-        {predump_deco, "decorator_tags", false}, {predump_cfg, "configlink", false},
-        {predump_route, "route_match", false},   {predump_sim, "similarity", true},
-        {predump_sem, "semantic_edges", true},   {predump_complexity, "complexity", false},
-        {predump_flakelock, "flakelock", false}, {predump_nix_eval, "nix_eval", true},
+        {predump_deco, "decorator_tags", false},    {predump_cfg, "configlink", false},
+        {predump_route, "route_match", false},       {predump_sim, "similarity", true},
+        {predump_sem, "semantic_edges", true},       {predump_complexity, "complexity", false},
+        {predump_flakelock, "flakelock", false},     {predump_nix_eval, "nix_eval", true},
+        {predump_nixoptions, "nixoptions", false},
     };
-    enum { PREDUMP_PASS_COUNT = 8 };
+    enum { PREDUMP_PASS_COUNT = 9 };
     struct timespec t;
     for (int i = 0; i < PREDUMP_PASS_COUNT && !check_cancel(p); i++) {
         /* "moderate_only" passes (similarity/semantic edges) run in FULL,
