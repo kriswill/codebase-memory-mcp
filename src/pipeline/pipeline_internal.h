@@ -515,6 +515,14 @@ int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx);
  * cycles (recursive). Runs on the graph buffer before the dump. */
 void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx);
 
+/* Pre-dump pass: Nix flake topology from flake.lock — one Flake node per lock
+ * node plus DEPENDS_ON / FOLLOWS / MOUNTS edges. No-op when no flake.lock. */
+int cbm_pipeline_pass_flakelock(cbm_pipeline_ctx_t *ctx);
+
+/* Pre-dump pass: resolved flake outputs via `nix flake show --json` — FlakeOutput
+ * nodes + PRODUCES edges. Runs only for a flake repo; failure-tolerant no-op. */
+int cbm_pipeline_pass_nix_eval(cbm_pipeline_ctx_t *ctx);
+
 /* ── Env URL scanner (pass_envscan.c) ────────────────────────────── */
 
 typedef struct {

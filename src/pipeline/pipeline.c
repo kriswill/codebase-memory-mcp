@@ -622,6 +622,12 @@ static void predump_cfg(cbm_pipeline_ctx_t *ctx) {
 static void predump_complexity(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_pass_complexity(ctx);
 }
+static void predump_flakelock(cbm_pipeline_ctx_t *ctx) {
+    cbm_pipeline_pass_flakelock(ctx);
+}
+static void predump_nix_eval(cbm_pipeline_ctx_t *ctx) {
+    cbm_pipeline_pass_nix_eval(ctx);
+}
 
 static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
     static const struct {
@@ -632,8 +638,9 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
         {predump_deco, "decorator_tags", false}, {predump_cfg, "configlink", false},
         {predump_route, "route_match", false},   {predump_sim, "similarity", true},
         {predump_sem, "semantic_edges", true},   {predump_complexity, "complexity", false},
+        {predump_flakelock, "flakelock", false}, {predump_nix_eval, "nix_eval", true},
     };
-    enum { PREDUMP_PASS_COUNT = 6 };
+    enum { PREDUMP_PASS_COUNT = 8 };
     struct timespec t;
     for (int i = 0; i < PREDUMP_PASS_COUNT && !check_cancel(p); i++) {
         /* "moderate_only" passes (similarity/semantic edges) run in FULL,
