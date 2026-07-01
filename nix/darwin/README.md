@@ -36,7 +36,7 @@ Enable per host:
 
 ```nix
 # in a host module, e.g. modules/hosts/<host>.nix
-kriswill.codebase-memory.enable = true;
+services.codebase-memory-mcp.enable = true;
 ```
 
 This puts `codebase-memory-mcp` + `cbm-ctl` on `PATH` and registers a launchd
@@ -46,9 +46,9 @@ background / low-priority I/O). Logs:
 
 | Option | Default | |
 |---|---|---|
-| `kriswill.codebase-memory.enable` | `false` | the agent + tools |
-| `kriswill.codebase-memory.package` | this flake's build | package to supervise |
-| `kriswill.codebase-memory.port` | `9749` | HTTP UI / daemon port |
+| `services.codebase-memory-mcp.enable` | `false` | the agent + tools |
+| `services.codebase-memory-mcp.package` | this flake's build | package to supervise |
+| `services.codebase-memory-mcp.port` | `9749` | HTTP UI / daemon port |
 
 Requires `system.primaryUser` (used for the per-user log paths).
 

@@ -17,14 +17,14 @@ self:
   ...
 }:
 let
-  cfg = config.kriswill.codebase-memory;
+  cfg = config.services.codebase-memory-mcp;
   user = config.system.primaryUser;
   homeDir = "/Users/${user}";
   sys = pkgs.stdenv.hostPlatform.system;
   cbmTools = self.packages.${sys}.cbm-tools;
 in
 {
-  options.kriswill.codebase-memory = {
+  options.services.codebase-memory-mcp = {
     enable = lib.mkEnableOption "launchd-supervised codebase-memory-mcp daemon + control CLI (cbm-ctl)";
 
     package = lib.mkOption {
@@ -45,7 +45,7 @@ in
     # Registering here turns a null system.primaryUser into nix-darwin's friendly
     # migration assertion instead of a raw "cannot coerce null to a string"
     # (homeDir interpolates ${user} for the log paths below).
-    system.requiresPrimaryUser = [ "kriswill.codebase-memory.enable" ];
+    system.requiresPrimaryUser = [ "services.codebase-memory-mcp.enable" ];
 
     environment.systemPackages = [
       cfg.package # codebase-memory-mcp (also the bare stdio MCP server for .mcp.json)
@@ -57,19 +57,25 @@ in
     # label, and the log filenames below match it. KeepAlive supervises;
     # ProcessType=Background + LowPriorityIO + Nice keep the watcher's reindexing
     # off concurrent clients.
-    launchd.user.agents."codebase-memory-mcp".serviceConfig = {
-      ProgramArguments = [ "${cbmTools}/bin/cbm-daemon" ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      ProcessType = "Background";
-      LowPriorityIO = true;
-      Nice = 5;
-      ThrottleInterval = 10;
-      StandardOutPath = "${homeDir}/Library/Logs/org.nixos.codebase-memory-mcp.out.log";
-      StandardErrorPath = "${homeDir}/Library/Logs/org.nixos.codebase-memory-mcp.err.log";
-      EnvironmentVariables = {
-        CBM_BIN = lib.getExe cfg.package;
-        CBM_PORT = toString cfg.port;
+    launchd.user.agents."codebase-memory-mcp" = {
+      # Back-reference to the enabling option: nix-darwin surfaces a friendly
+      # "managed by services.codebase-memory-mcp.enable" message if the agent is
+      # touched out-of-band, instead of a bare launchd error.
+      managedBy = "services.codebase-memory-mcp.enable";
+      serviceConfig = {
+        ProgramArguments = [ "${cbmTools}/bin/cbm-daemon" ];
+        RunAtLoad = true;
+        KeepAlive = true;
+        ProcessType = "Background";
+        LowPriorityIO = true;
+        Nice = 5;
+        ThrottleInterval = 10;
+        StandardOutPath = "${homeDir}/Library/Logs/org.nixos.codebase-memory-mcp.out.log";
+        StandardErrorPath = "${homeDir}/Library/Logs/org.nixos.codebase-memory-mcp.err.log";
+        EnvironmentVariables = {
+          CBM_BIN = lib.getExe cfg.package;
+          CBM_PORT = toString cfg.port;
+        };
       };
     };
   };
