@@ -751,7 +751,7 @@ static const char *vim_var_types[] = {"let_statement", NULL};
 
 // ==================== NIX ====================
 static const char *nix_func_types[] = {"function_expression", NULL};
-static const char *nix_module_types[] = {"source_expression", NULL};
+static const char *nix_module_types[] = {"source_code", NULL};
 static const char *nix_call_types[] = {"apply_expression", NULL};
 static const char *nix_branch_types[] = {"if_expression", NULL};
 static const char *nix_var_types[] = {"binding", NULL};
