@@ -5351,13 +5351,13 @@ enum { NIX_VISIT_DEPTH_LIMIT = 512 };
  * is not counted twice. `inherit` statements are left for a future pass.
  *
  * The walk carries an ancestor-attrpath `prefix` and emits each binding as
- * `prefix.attrpath`, so a nested host set `kriswill = { dnsmasq.enable = true; }`
- * yields the fully-qualified `kriswill.dnsmasq.enable` (not bare `dnsmasq.enable`)
- * — the form that matches an option define `options.kriswill.dnsmasq.enable`.
+ * `prefix.attrpath`, so a nested host set `myns = { dnsmasq.enable = true; }`
+ * yields the fully-qualified `myns.dnsmasq.enable` (not bare `dnsmasq.enable`)
+ * — the form that matches an option define `options.myns.dnsmasq.enable`.
  * Attrset members fold into the prefix; a `function_expression` (module lambda)
  * opens a fresh option namespace, so its body is walked with the prefix RESET to
  * "". Without the reset, a Dendritic module `flake.modules.darwin.foo = {…}: {
- * options.kriswill.foo.enable = …; }` would qualify the define as
+ * options.myns.foo.enable = …; }` would qualify the define as
  * `flake.modules.darwin.foo.options.…` and it would no longer start with
  * `options.`. Everything else (attrsets, lists, `let`/`with`/`if`, apply args)
  * is path-transparent: the prefix passes through so config blocks wrapped in

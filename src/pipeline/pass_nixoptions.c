@@ -3,7 +3,7 @@
  *
  * A feature module DEFINES an option with `options.<path> = lib.mkEnableOption …;`
  * and a host/module SETS it with `<path> = <value>;`. In a Dendritic repo the set
- * is nested, e.g. `configurations.darwin.<host>.module = { kriswill.dnsmasq.enable
+ * is nested, e.g. `configurations.darwin.<host>.module = { myns.dnsmasq.enable
  * = true; }`. After the qualified-attrpath walk (extract_defs.c walk_nix_bindings),
  * defines surface as Variable nodes named `options.<path>` (the module-lambda
  * boundary resets the prefix, so the name keeps its `options.` head) and sets
@@ -83,8 +83,8 @@ static const char *nixopt_option_key(const char *name) {
 
 /* A set Variable `name` (length `ln`) sets define `key` (length `lk`) when it
  * equals the key or ends with ".<key>" at a segment boundary — so
- * `configurations.darwin.k.module.kriswill.dnsmasq.enable` and
- * `config.kriswill.dnsmasq.enable` both set `kriswill.dnsmasq.enable`, and a
+ * `configurations.darwin.k.module.myns.dnsmasq.enable` and
+ * `config.myns.dnsmasq.enable` both set `myns.dnsmasq.enable`, and a
  * plain top-level set matches by equality. Lengths are passed in so the caller's
  * O(sets×defines) scan does not recompute strlen(name) per define. */
 static bool nixopt_name_sets_key(const char *name, size_t ln, const char *key, size_t lk) {

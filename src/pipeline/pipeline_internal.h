@@ -581,8 +581,8 @@ int cbm_pipeline_pass_flakelock(cbm_pipeline_ctx_t *ctx);
 int cbm_pipeline_pass_nix_eval(cbm_pipeline_ctx_t *ctx);
 
 /* Pre-dump pass: NixOS/nix-darwin option dataflow — CONFIGURES edges from each
- * option-set Variable (`kriswill.dnsmasq.enable = …`) to the module that defines
- * it (`options.kriswill.dnsmasq.enable`). No-op when no option defines exist. */
+ * option-set Variable (`myns.dnsmasq.enable = …`) to the module that defines
+ * it (`options.myns.dnsmasq.enable`). No-op when no option defines exist. */
 int cbm_pipeline_pass_nixoptions(cbm_pipeline_ctx_t *ctx);
 
 /* ── Env URL scanner (pass_envscan.c) ────────────────────────────── */
