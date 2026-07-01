@@ -50,7 +50,10 @@ background / low-priority I/O). Logs:
 | `services.codebase-memory-mcp.package` | this flake's build | package to supervise |
 | `services.codebase-memory-mcp.port` | `9749` | HTTP UI / daemon port |
 
-Requires `system.primaryUser` (used for the per-user log paths).
+Requires `system.primaryUser` (used for the per-user log paths). The module's
+`managedBy` back-reference auto-registers this in `system.requiresPrimaryUser`,
+so a null `primaryUser` surfaces nix-darwin's migration assertion rather than a
+raw coercion error.
 
 ### `cbm-ctl`
 
