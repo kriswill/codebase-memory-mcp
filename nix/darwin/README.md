@@ -22,9 +22,9 @@ graceful SIGTERM handler.
 
 ## Contents
 
-- **`cbm-daemon.c`** — the launchd `ProgramArguments` wrapper above.
-- **`cbm-ctl.c`** — control CLI (below).
-- **`package.nix`** — compiles both into the `cbm-tools` package; tool paths
+- **`tools/cbm-daemon.c`** — the launchd `ProgramArguments` wrapper above.
+- **`tools/cbm-ctl.c`** — control CLI (below).
+- **`tools/package.nix`** — compiles both into the `cbm-tools` package; tool paths
   (`codebase-memory-mcp`, `git`, `launchctl`, …) are baked in via `-D`, so the
   binaries rely on nothing in `PATH`.
 - **`module.nix`** — the nix-darwin module, exported as
