@@ -2233,7 +2233,48 @@ static void parse_just_imports(CBMExtractCtx *ctx) {
     ts_tree_cursor_delete(&cursor);
 }
 
-// --- Nix imports: import ./path ---
+// Push each path/string element of any list_expression reachable within `node`
+// as an import. Covers `imports = [ ./a.nix ./b.nix ];` and the common
+// `imports = (builtins.attrValues …) ++ [ ./x.nix ];` (`++` / `lib.optionals`)
+// forms — only literal path/string elements are pushed, so dynamic list members
+// (attrValues, lambdas, function calls) are silently skipped.
+static void nix_push_import_list(CBMExtractCtx *ctx, TSNode node, // NOLINT(misc-no-recursion)
+                                 int depth) {
+    if (depth > CBM_SZ_32 || ts_node_is_null(node)) {
+        return;
+    }
+    if (strcmp(ts_node_type(node), "list_expression") == 0) {
+        uint32_t ec = ts_node_named_child_count(node);
+        for (uint32_t i = 0; i < ec; i++) {
+            TSNode el = ts_node_named_child(node, i);
+            const char *ek = ts_node_type(el);
+            if (strcmp(ek, "path_expression") == 0 || strcmp(ek, "string_expression") == 0 ||
+                strcmp(ek, "indented_string_expression") == 0) {
+                push_string_descendant_import(ctx, el);
+            }
+        }
+    }
+    uint32_t n = ts_node_named_child_count(node);
+    for (uint32_t i = 0; i < n; i++) {
+        nix_push_import_list(ctx, ts_node_named_child(node, i), depth + 1);
+    }
+}
+
+// Match a Nix attrpath whose last segment is `imports` (`imports` itself or any
+// `foo.bar.imports`), the module-composition list.
+static bool nix_attrpath_is_imports(const char *ap) {
+    if (!ap) {
+        return false;
+    }
+    const size_t il = sizeof("imports") - 1; /* strlen("imports") */
+    size_t al = strlen(ap);
+    if (strcmp(ap, "imports") == 0) {
+        return true;
+    }
+    return al > il && ap[al - il - 1] == '.' && strcmp(ap + al - il, "imports") == 0;
+}
+
+// --- Nix imports: import ./path  and  imports = [ ./a.nix … ] ---
 static void parse_nix_imports(CBMExtractCtx *ctx) {
     CBMArena *a = ctx->arena;
     TSNodeStack stack;
@@ -2241,6 +2282,16 @@ static void parse_nix_imports(CBMExtractCtx *ctx) {
     ts_nstack_push(&stack, a, ctx->root);
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
+        /* `imports = [ ./a.nix ./b.nix ];` — the darwin/NixOS module composition
+         * list. Each literal path element becomes an IMPORTS edge (the pipeline
+         * resolves ctx->result->imports against sibling files). */
+        if (strcmp(ts_node_type(node), "binding") == 0) {
+            TSNode ap = ts_node_child_by_field_name(node, TS_FIELD("attrpath"));
+            if (!ts_node_is_null(ap) && nix_attrpath_is_imports(cbm_node_text(a, ap, ctx->source))) {
+                nix_push_import_list(ctx, ts_node_child_by_field_name(node, TS_FIELD("expression")),
+                                     0);
+            }
+        }
         if (strcmp(ts_node_type(node), "apply_expression") == 0) {
             /* import <path> — the function position is the identifier "import",
              * the argument a path_expression / path_fragment / string. */
