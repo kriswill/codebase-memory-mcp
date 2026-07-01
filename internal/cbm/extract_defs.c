@@ -5380,8 +5380,8 @@ static void nix_visit_binding(CBMExtractCtx *ctx, TSNode node, const char *prefi
                 const char *full = (prefix && prefix[0])
                                        ? cbm_arena_sprintf(ctx->arena, "%s.%s", prefix, local)
                                        : local;
-                bool is_func = !ts_node_is_null(val) &&
-                               strcmp(ts_node_type(val), "function_expression") == 0;
+                bool is_func =
+                    !ts_node_is_null(val) && strcmp(ts_node_type(val), "function_expression") == 0;
                 if (!is_func) {
                     push_var_def(ctx, full, node);
                 }

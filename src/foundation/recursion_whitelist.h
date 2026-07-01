@@ -18,6 +18,10 @@
  * R import scanner (bounded by source-file AST depth):
  *   - r_collect_imports
  *
+ * Nix extraction walkers (bounded by AST depth):
+ *   - nix_push_import_list (imports = [ ./a.nix ] composition lists)
+ *   - nix_visit_binding (option/config attrpath descent)
+ *
  * Extraction descendant search (bounded by AST depth):
  *   - find_first_descendant_by_kind (Verilog/SystemVerilog name wrappers)
  *   - find_first_descendant_of (Dart/Zig import URI/string nesting)
@@ -30,4 +34,5 @@
         "parse_post_where", "cbm_parse", "eval_expr", "glob_match", "glob_match_star",        \
         "glob_match_doublestar", "glob_match_doublestar_slash", "glob_match_doublestar_any",  \
         "parse_bool_expr", "parse_bool_atom", "r_collect_imports",                            \
-        "find_first_descendant_by_kind", "find_first_descendant_of"
+        "find_first_descendant_by_kind", "find_first_descendant_of", "nix_push_import_list",  \
+        "nix_visit_binding"

@@ -43,6 +43,10 @@ src/pipeline/artifact.c:cbm_popen:git rev-parse HEAD for artifact metadata (hard
 src/pipeline/artifact.c:cbm_popen:git config merge.ours.driver for gitattributes (hardcoded cmd)
 src/pipeline/artifact.c:popen:via cbm_popen wrapper calls
 
+# ── Pipeline: Nix flake topology (nix flake show for flakelock/nixoptions passes) ──
+src/pipeline/pass_nix_eval.c:cbm_popen:nix flake show --json for flake-topology indexing (hardcoded subcommand, repo_path single-quoted, timeout 180 bounded, failure-tolerant no-op)
+src/pipeline/pass_nix_eval.c:popen:via cbm_popen wrapper call
+
 # ── UI: HTTP server process management ─────────────────────────────────────
 src/ui/http_server.c:popen:ps process listing for metrics endpoint
 src/ui/http_server.c:fork:spawn indexing subprocess

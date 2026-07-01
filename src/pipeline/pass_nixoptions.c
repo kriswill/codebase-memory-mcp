@@ -148,8 +148,7 @@ int cbm_pipeline_pass_nixoptions(cbm_pipeline_ctx_t *ctx) {
         /* Pass 1: the length of the longest define key this set matches. */
         size_t best_len = 0;
         for (int di = 0; di < define_count; di++) {
-            if (vars[vi]->id != defines[di].node_id &&
-                defines[di].key_len > best_len &&
+            if (vars[vi]->id != defines[di].node_id && defines[di].key_len > best_len &&
                 nixopt_name_sets_key(name, ln, defines[di].key, defines[di].key_len)) {
                 best_len = defines[di].key_len;
             }

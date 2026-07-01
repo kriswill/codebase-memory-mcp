@@ -100,8 +100,8 @@ static char *build_props(const char *name, bool is_root, yyjson_val *locked) {
     yyjson_mut_obj_add_bool(pdoc, obj, "is_root", is_root);
     yyjson_mut_obj_add_strcpy(pdoc, obj, "input_name", name);
     if (locked && yyjson_is_obj(locked)) {
-        static const char *str_fields[] = {"type", "owner",   "repo", "rev",
-                                           "ref",  "narHash", "path", "url", NULL};
+        static const char *str_fields[] = {"type",    "owner", "repo", "rev", "ref",
+                                           "narHash", "path",  "url",  NULL};
         for (int i = 0; str_fields[i]; i++) {
             yyjson_val *fv = yyjson_obj_get(locked, str_fields[i]);
             if (fv && yyjson_is_str(fv)) {

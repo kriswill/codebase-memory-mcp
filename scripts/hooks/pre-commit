@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Pre-commit hook: linters + security audit + build + tests.
+# Pre-commit hook: linters + security audit. Tests run in CI (make test), not
+# here — the suite is a single-core, multi-minute build+run, deferred to keep
+# commits fast. Run `make test` locally before pushing.
 #
 # Activated automatically via scripts/setup.sh or manually:
 #   git config core.hooksPath scripts/hooks
 
-echo "pre-commit: running all linters in parallel..."
-make -j3 -f Makefile.cbm lint
+# Match CI's gate: lint-ci = cppcheck + clang-format + no-suppress (see _lint.yml).
+# clang-tidy (make lint-tidy) is intentionally excluded — its .clang-tidy config is
+# aspirational and not enforced by CI; run it manually when hardening.
+echo "pre-commit: running CI linters in parallel..."
+make -j3 -f Makefile.cbm lint-ci
 
 echo "pre-commit: security audit (source-level)..."
 scripts/security-audit.sh
 
-echo "pre-commit: building and running tests..."
-make -j$(sysctl -n hw.ncpu 2>/dev/null || nproc) -f Makefile.cbm test
+# Tests are intentionally NOT run in pre-commit. The suite builds and runs as a
+# single non-incremental, single-core binary (many minutes), which pushed commits
+# toward --no-verify. CI runs `make test` on every push/PR; run it locally before
+# pushing. (Speeding up the local build/run is tracked separately.)

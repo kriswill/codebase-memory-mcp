@@ -704,7 +704,12 @@ lint-tidy:
 	@echo "=== clang-tidy ==="
 	@$(CLANG_TIDY) --quiet $(LINT_SRCS) -- $(CFLAGS_COMMON) $(SYSROOT_FLAG)
 
-# cppcheck: complementary analysis (config in .cppcheck)
+# cppcheck: complementary analysis (config in .cppcheck). The two --suppress lines
+# below silence cppcheck >2.20 false positives absent from CI's pinned 2.20.0:
+# cli.c compares a uint32_t size against a 500MiB constant (2.21 misreads the type
+# as unsigned short); cypher.c has redundant NULL guards after an early non-NULL
+# return. Routed through the Makefile (not .cppcheck) per that file's policy for
+# version-specific IDs.
 lint-cppcheck:
 	@echo "=== cppcheck ==="
 	@$(CPPCHECK) --enable=warning,style,performance,portability \
@@ -720,6 +725,8 @@ lint-cppcheck:
 		--suppress=nullPointerArithmeticOutOfMemory \
 		--suppress=ctunullpointerOutOfMemory \
 		--suppress='nullPointer:internal/cbm/sqlite_writer.c' \
+		--suppress='knownConditionTrueFalse:src/cypher/cypher.c' \
+		--suppress='compareValueOutOfTypeRangeError:src/cli/cli.c' \
 		-Isrc -Ivendored -Ivendored/sqlite3 \
 		-I$(CBM_DIR) -I$(TS_INCLUDE) \
 		$(LINT_SRCS)

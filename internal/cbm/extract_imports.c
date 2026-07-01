@@ -2290,7 +2290,8 @@ static void parse_nix_imports(CBMExtractCtx *ctx) {
          * resolves ctx->result->imports against sibling files). */
         if (strcmp(ts_node_type(node), "binding") == 0) {
             TSNode ap = ts_node_child_by_field_name(node, TS_FIELD("attrpath"));
-            if (!ts_node_is_null(ap) && nix_attrpath_is_imports(cbm_node_text(a, ap, ctx->source))) {
+            if (!ts_node_is_null(ap) &&
+                nix_attrpath_is_imports(cbm_node_text(a, ap, ctx->source))) {
                 nix_push_import_list(ctx, ts_node_child_by_field_name(node, TS_FIELD("expression")),
                                      0);
             }
