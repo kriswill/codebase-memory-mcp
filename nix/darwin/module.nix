@@ -42,11 +42,6 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # Registering here turns a null system.primaryUser into nix-darwin's friendly
-    # migration assertion instead of a raw "cannot coerce null to a string"
-    # (homeDir interpolates ${user} for the log paths below).
-    system.requiresPrimaryUser = [ "services.codebase-memory-mcp.enable" ];
-
     environment.systemPackages = [
       cfg.package # codebase-memory-mcp (also the bare stdio MCP server for .mcp.json)
       cbmTools # cbm-ctl + cbm-daemon
@@ -58,9 +53,13 @@ in
     # ProcessType=Background + LowPriorityIO + Nice keep the watcher's reindexing
     # off concurrent clients.
     launchd.user.agents."codebase-memory-mcp" = {
-      # Back-reference to the enabling option: nix-darwin surfaces a friendly
-      # "managed by services.codebase-memory-mcp.enable" message if the agent is
-      # touched out-of-band, instead of a bare launchd error.
+      # Back-reference to the enabling option. nix-darwin uses it to (a) surface a
+      # friendly "managed by services.codebase-memory-mcp.enable" message if the
+      # agent is touched out-of-band instead of a bare launchd error, and (b)
+      # auto-register the option in system.requiresPrimaryUser — so a null
+      # system.primaryUser fails with that migration assertion rather than a raw
+      # "cannot coerce null to a string" when homeDir interpolates ${user} for the
+      # log paths above.
       managedBy = "services.codebase-memory-mcp.enable";
       serviceConfig = {
         ProgramArguments = [ "${cbmTools}/bin/cbm-daemon" ];
