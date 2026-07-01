@@ -5124,39 +5124,78 @@ static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
     }
 }
 
+/* Recursion bound for the Nix binding walk. Nix ASTs are shallow in practice
+ * (real modules nest ~10-15 deep); this guards against pathological/generated
+ * files without capping any realistic module. */
+enum { NIX_VISIT_DEPTH_LIMIT = 512 };
+
 /* Nix: bindings (`attrpath = expr;`) carry their name in the `attrpath` field and
  * nest arbitrarily deep inside attrsets / let-expressions, so the top-level-only
  * extract_variables walk never reaches them. Walk the whole subtree and emit a
  * Variable for each binding, skipping bindings whose value is a function_expression
  * (those become Functions via walk_defs + the Nix function-naming path) so a function
- * is not counted twice. `inherit` statements are left for a future pass. */
-static void walk_nix_bindings(CBMExtractCtx *ctx, TSNode root) {
-    CBMArena *a = ctx->arena;
-    TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CBM_SZ_256);
-    ts_nstack_push(&stack, ctx->arena, root);
-
-    while (stack.count > 0) {
-        TSNode node = ts_nstack_pop(&stack);
-        if (strcmp(ts_node_type(node), "binding") == 0) {
-            TSNode val = ts_node_child_by_field_name(node, TS_FIELD("expression"));
-            bool is_func =
-                !ts_node_is_null(val) && strcmp(ts_node_type(val), "function_expression") == 0;
-            if (!is_func) {
-                TSNode attrpath = ts_node_child_by_field_name(node, TS_FIELD("attrpath"));
-                if (!ts_node_is_null(attrpath)) {
-                    push_var_def(ctx, cbm_node_text(a, attrpath, ctx->source), node);
-                }
-            }
-        }
-        uint32_t count = ts_node_child_count(node);
-        for (int i = (int)count - SKIP_CHAR; i >= 0; i--) {
-            TSNode child = ts_node_child(node, (uint32_t)i);
-            if (!ts_node_is_null(child)) {
-                ts_nstack_push(&stack, ctx->arena, child);
-            }
-        }
+ * is not counted twice. `inherit` statements are left for a future pass.
+ *
+ * The walk carries an ancestor-attrpath `prefix` and emits each binding as
+ * `prefix.attrpath`, so a nested host set `kriswill = { dnsmasq.enable = true; }`
+ * yields the fully-qualified `kriswill.dnsmasq.enable` (not bare `dnsmasq.enable`)
+ * — the form that matches an option define `options.kriswill.dnsmasq.enable`.
+ * Attrset members fold into the prefix; a `function_expression` (module lambda)
+ * opens a fresh option namespace, so its body is walked with the prefix RESET to
+ * "". Without the reset, a Dendritic module `flake.modules.darwin.foo = {…}: {
+ * options.kriswill.foo.enable = …; }` would qualify the define as
+ * `flake.modules.darwin.foo.options.…` and it would no longer start with
+ * `options.`. Everything else (attrsets, lists, `let`/`with`/`if`, apply args)
+ * is path-transparent: the prefix passes through so config blocks wrapped in
+ * `lib.mkIf … { … }` / `lib.mkMerge [ … ]` are still reached (matching the prior
+ * blanket-DFS coverage). */
+static void nix_visit_binding(CBMExtractCtx *ctx, TSNode node, const char *prefix,
+                              int depth) { // NOLINT(misc-no-recursion)
+    if (depth > NIX_VISIT_DEPTH_LIMIT || ts_node_is_null(node)) {
+        return;
     }
+    const char *kind = ts_node_type(node);
+
+    if (strcmp(kind, "binding") == 0) {
+        TSNode attrpath = ts_node_child_by_field_name(node, TS_FIELD("attrpath"));
+        TSNode val = ts_node_child_by_field_name(node, TS_FIELD("expression"));
+        const char *child_prefix = prefix;
+        if (!ts_node_is_null(attrpath)) {
+            const char *local = cbm_node_text(ctx->arena, attrpath, ctx->source);
+            if (local && local[0]) {
+                const char *full = (prefix && prefix[0])
+                                       ? cbm_arena_sprintf(ctx->arena, "%s.%s", prefix, local)
+                                       : local;
+                bool is_func = !ts_node_is_null(val) &&
+                               strcmp(ts_node_type(val), "function_expression") == 0;
+                if (!is_func) {
+                    push_var_def(ctx, full, node);
+                }
+                child_prefix = full;
+            }
+        }
+        /* Descend the value only (not the attrpath), folding the qualified path. */
+        nix_visit_binding(ctx, val, child_prefix, depth + 1);
+        return;
+    }
+
+    if (strcmp(kind, "function_expression") == 0) {
+        /* Module lambda: reset the option namespace for its body. */
+        TSNode body = ts_node_child_by_field_name(node, TS_FIELD("body"));
+        nix_visit_binding(ctx, body, "", depth + 1);
+        return;
+    }
+
+    /* Path-transparent container (attrset_expression, binding_set, list, apply,
+     * let/with/if, parenthesized, …): pass the prefix through every named child. */
+    uint32_t n = ts_node_named_child_count(node);
+    for (uint32_t i = 0; i < n; i++) {
+        nix_visit_binding(ctx, ts_node_named_child(node, i), prefix, depth + 1);
+    }
+}
+
+static void walk_nix_bindings(CBMExtractCtx *ctx, TSNode root) {
+    nix_visit_binding(ctx, root, "", 0);
 }
 
 static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
