@@ -26,6 +26,7 @@
 #include "pipeline/pipeline_internal.h"
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/log.h"
+#include "foundation/str_util.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -46,7 +47,8 @@ enum { NIXOPT_MAX_DEFINES = CBM_SZ_2K };
 typedef struct {
     int64_t node_id;
     const char *file_path; /* borrowed from gbuf node */
-    const char *key;       /* borrowed: node name past the "options." prefix */
+    const char *key;       /* borrowed: node name past the "options." segment */
+    size_t key_len;        /* strlen(key), precomputed for the O(sets×defines) scan */
 } nixopt_define_t;
 
 static bool nixopt_ends_with(const char *s, const char *suffix) {
@@ -59,17 +61,37 @@ static bool nixopt_is_nix_file(const char *path) {
     return path && nixopt_ends_with(path, ".nix");
 }
 
-/* A set Variable `name` sets define `key` when it equals the key or ends with
- * ".<key>" at a segment boundary (so `configurations.darwin.k.module.kriswill.
- * dnsmasq.enable` and `config.kriswill.dnsmasq.enable` both set the define
- * `kriswill.dnsmasq.enable`, and a plain top-level set matches by equality). */
-static bool nixopt_name_sets_key(const char *name, const char *key) {
-    if (strcmp(name, key) == 0) {
-        return true;
+/* If `name` is an option define, return the option path after the `options.`
+ * segment, else NULL. Handles both the lambda-reset form (`options.<path>`) and
+ * a module written as a bare attrset with no `{…}:` head, whose walk keeps the
+ * mount prefix (`flake.modules.nixos.foo.options.<path>`). The last `.options.`
+ * segment wins so the returned key is the option path, not the mount path. */
+static const char *nixopt_option_key(const char *name) {
+    const size_t plen = sizeof(NIXOPT_OPTIONS_PREFIX) - 1; /* "options." */
+    if (strncmp(name, NIXOPT_OPTIONS_PREFIX, plen) == 0) {
+        return name + plen;
     }
-    size_t ln = strlen(name);
-    size_t lk = strlen(key);
-    return ln > lk + 1 && name[ln - lk - 1] == '.' && strcmp(name + ln - lk, key) == 0;
+    const char *key = NULL;
+    const char *scan = name;
+    const char *hit;
+    while ((hit = strstr(scan, ".options.")) != NULL) {
+        key = hit + (sizeof(".options.") - 1);
+        scan = hit + 1;
+    }
+    return key;
+}
+
+/* A set Variable `name` (length `ln`) sets define `key` (length `lk`) when it
+ * equals the key or ends with ".<key>" at a segment boundary — so
+ * `configurations.darwin.k.module.kriswill.dnsmasq.enable` and
+ * `config.kriswill.dnsmasq.enable` both set `kriswill.dnsmasq.enable`, and a
+ * plain top-level set matches by equality. Lengths are passed in so the caller's
+ * O(sets×defines) scan does not recompute strlen(name) per define. */
+static bool nixopt_name_sets_key(const char *name, size_t ln, const char *key, size_t lk) {
+    if (ln == lk) {
+        return memcmp(name, key, lk) == 0;
+    }
+    return ln > lk + 1 && name[ln - lk - 1] == '.' && memcmp(name + ln - lk, key, lk) == 0;
 }
 
 int cbm_pipeline_pass_nixoptions(cbm_pipeline_ctx_t *ctx) {
@@ -85,25 +107,22 @@ int cbm_pipeline_pass_nixoptions(cbm_pipeline_ctx_t *ctx) {
     }
 
     /* Phase A — collect option defines: a .nix Variable whose (qualified) name
-     * starts with "options." and carries a real dotted option path. */
+     * carries an `options.<path>` segment with a real dotted option path. */
     static nixopt_define_t defines[NIXOPT_MAX_DEFINES];
     int define_count = 0;
-    const size_t plen = sizeof(NIXOPT_OPTIONS_PREFIX) - 1;
     for (int i = 0; i < var_count && define_count < NIXOPT_MAX_DEFINES; i++) {
         const char *name = vars[i]->name;
         if (!name || !nixopt_is_nix_file(vars[i]->file_path)) {
             continue;
         }
-        if (strncmp(name, NIXOPT_OPTIONS_PREFIX, plen) != 0) {
-            continue;
-        }
-        const char *key = name + plen;
-        if (!key[0] || !strchr(key, '.')) {
-            continue; /* need a real dotted option path (≥2 segments) */
+        const char *key = nixopt_option_key(name);
+        if (!key || !key[0] || !strchr(key, '.')) {
+            continue; /* not an option define, or not a real dotted path (≥2 segments) */
         }
         defines[define_count].node_id = vars[i]->id;
         defines[define_count].file_path = vars[i]->file_path;
         defines[define_count].key = key;
+        defines[define_count].key_len = strlen(key);
         define_count++;
     }
 
@@ -112,30 +131,48 @@ int cbm_pipeline_pass_nixoptions(cbm_pipeline_ctx_t *ctx) {
         return 0;
     }
 
-    /* Phase B — link each set candidate to any define whose option path it sets. */
+    /* Phase B — link each set candidate to the MOST SPECIFIC define(s) it sets.
+     * Only the longest matching key wins, so a set (e.g. …services.nginx.enable)
+     * is not also linked to every define whose key is a shorter trailing suffix
+     * of its path (e.g. a separate options.nginx.enable). */
     int edge_count = 0;
     for (int vi = 0; vi < var_count; vi++) {
         const char *name = vars[vi]->name;
         if (!name || !nixopt_is_nix_file(vars[vi]->file_path)) {
             continue;
         }
-        if (strncmp(name, NIXOPT_OPTIONS_PREFIX, plen) == 0) {
+        if (nixopt_option_key(name)) {
             continue; /* a define is never a set */
         }
+        size_t ln = strlen(name);
+        /* Pass 1: the length of the longest define key this set matches. */
+        size_t best_len = 0;
         for (int di = 0; di < define_count; di++) {
-            if (vars[vi]->id == defines[di].node_id) {
-                continue;
+            if (vars[vi]->id != defines[di].node_id &&
+                defines[di].key_len > best_len &&
+                nixopt_name_sets_key(name, ln, defines[di].key, defines[di].key_len)) {
+                best_len = defines[di].key_len;
             }
-            if (!nixopt_name_sets_key(name, defines[di].key)) {
+        }
+        if (best_len == 0) {
+            continue;
+        }
+        /* Pass 2: emit to every define matching at that longest length (an option
+         * declared in more than one file links from the set to each). */
+        for (int di = 0; di < define_count; di++) {
+            if (vars[vi]->id == defines[di].node_id || defines[di].key_len != best_len ||
+                !nixopt_name_sets_key(name, ln, defines[di].key, defines[di].key_len)) {
                 continue;
             }
             bool same_file = defines[di].file_path && vars[vi]->file_path &&
                              strcmp(defines[di].file_path, vars[vi]->file_path) == 0;
             double confidence = same_file ? CONF_NIXOPT_SAME : CONF_NIXOPT_CROSS;
+            char keybuf[CBM_SZ_256];
+            cbm_json_escape(keybuf, (int)sizeof(keybuf), defines[di].key);
             char props[CBM_SZ_512];
             snprintf(props, sizeof(props),
                      "{\"strategy\":\"nix_option_set\",\"confidence\":%.2f,\"config_key\":\"%s\"}",
-                     confidence, defines[di].key);
+                     confidence, keybuf);
             cbm_gbuf_insert_edge(gb, vars[vi]->id, defines[di].node_id, "CONFIGURES", props);
             edge_count++;
         }

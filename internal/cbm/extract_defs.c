@@ -5180,14 +5180,34 @@ static void nix_visit_binding(CBMExtractCtx *ctx, TSNode node, const char *prefi
     }
 
     if (strcmp(kind, "function_expression") == 0) {
-        /* Module lambda: reset the option namespace for its body. */
+        /* Module lambda: reset the option namespace for the body AND the formal
+         * parameter defaults (`{ settings ? { … }, … }:`). Both are their own
+         * scope, not part of the enclosing attrpath — descending the formals keeps
+         * bindings inside a default value indexed (matching the prior blanket DFS). */
+        nix_visit_binding(ctx, ts_node_child_by_field_name(node, TS_FIELD("body")), "", depth + 1);
+        nix_visit_binding(ctx, ts_node_child_by_field_name(node, TS_FIELD("formals")), "",
+                          depth + 1);
+        return;
+    }
+
+    if (strcmp(kind, "let_expression") == 0) {
+        /* `let <locals> in <body>`: the `in` body continues the enclosing attrpath,
+         * but the let-bound locals are their own scope. Qualify the locals from ""
+         * (never fold them into the prefix) so a local `enable` does not surface as
+         * a phantom option leaf like `services.nginx.conf.enable` that could then
+         * match an option define. */
         TSNode body = ts_node_child_by_field_name(node, TS_FIELD("body"));
-        nix_visit_binding(ctx, body, "", depth + 1);
+        uint32_t ln = ts_node_named_child_count(node);
+        for (uint32_t i = 0; i < ln; i++) {
+            TSNode c = ts_node_named_child(node, i);
+            const char *cp = (!ts_node_is_null(body) && ts_node_eq(c, body)) ? prefix : "";
+            nix_visit_binding(ctx, c, cp, depth + 1);
+        }
         return;
     }
 
     /* Path-transparent container (attrset_expression, binding_set, list, apply,
-     * let/with/if, parenthesized, …): pass the prefix through every named child. */
+     * with/if, parenthesized, …): pass the prefix through every named child. */
     uint32_t n = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < n; i++) {
         nix_visit_binding(ctx, ts_node_named_child(node, i), prefix, depth + 1);

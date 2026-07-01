@@ -2233,26 +2233,29 @@ static void parse_just_imports(CBMExtractCtx *ctx) {
     ts_tree_cursor_delete(&cursor);
 }
 
-// Push each path/string element of any list_expression reachable within `node`
-// as an import. Covers `imports = [ ./a.nix ./b.nix ];` and the common
-// `imports = (builtins.attrValues …) ++ [ ./x.nix ];` (`++` / `lib.optionals`)
-// forms — only literal path/string elements are pushed, so dynamic list members
-// (attrValues, lambdas, function calls) are silently skipped.
+// Push each literal path/string element of the imports list expression as an
+// import. Covers `imports = [ ./a.nix ./b.nix ];` and `imports =
+// (builtins.attrValues …) ++ [ ./x.nix ];`. Recursion is restricted to
+// list-joining nodes (list / `++` binary_expression / parenthesis) so a path
+// that lives inside a function-call argument — e.g.
+// `imports = [ (import ./m.nix { extra = [ ./y.nix ]; }) ];` — is NOT harvested
+// as a composed module. Dynamic members (attrValues, lambdas, calls) are
+// silently skipped (the bare `import <path>` apply form is handled separately).
 static void nix_push_import_list(CBMExtractCtx *ctx, TSNode node, // NOLINT(misc-no-recursion)
                                  int depth) {
     if (depth > CBM_SZ_32 || ts_node_is_null(node)) {
         return;
     }
-    if (strcmp(ts_node_type(node), "list_expression") == 0) {
-        uint32_t ec = ts_node_named_child_count(node);
-        for (uint32_t i = 0; i < ec; i++) {
-            TSNode el = ts_node_named_child(node, i);
-            const char *ek = ts_node_type(el);
-            if (strcmp(ek, "path_expression") == 0 || strcmp(ek, "string_expression") == 0 ||
-                strcmp(ek, "indented_string_expression") == 0) {
-                push_string_descendant_import(ctx, el);
-            }
-        }
+    const char *k = ts_node_type(node);
+    if (strcmp(k, "path_expression") == 0 || strcmp(k, "string_expression") == 0 ||
+        strcmp(k, "indented_string_expression") == 0) {
+        push_string_descendant_import(ctx, node);
+        return;
+    }
+    /* Only descend through list-joining constructs, never into call/attrset args. */
+    if (strcmp(k, "list_expression") != 0 && strcmp(k, "binary_expression") != 0 &&
+        strcmp(k, "parenthesized_expression") != 0) {
+        return;
     }
     uint32_t n = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < n; i++) {
