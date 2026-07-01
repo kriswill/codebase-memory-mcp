@@ -5338,8 +5338,49 @@ static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
     }
 }
 
+/* Nix: bindings (`attrpath = expr;`) carry their name in the `attrpath` field and
+ * nest arbitrarily deep inside attrsets / let-expressions, so the top-level-only
+ * extract_variables walk never reaches them. Walk the whole subtree and emit a
+ * Variable for each binding, skipping bindings whose value is a function_expression
+ * (those become Functions via walk_defs + the Nix function-naming path) so a function
+ * is not counted twice. `inherit` statements are left for a future pass. */
+static void walk_nix_bindings(CBMExtractCtx *ctx, TSNode root) {
+    CBMArena *a = ctx->arena;
+    TSNodeStack stack;
+    ts_nstack_init(&stack, ctx->arena, CBM_SZ_256);
+    ts_nstack_push(&stack, ctx->arena, root);
+
+    while (stack.count > 0) {
+        TSNode node = ts_nstack_pop(&stack);
+        if (strcmp(ts_node_type(node), "binding") == 0) {
+            TSNode val = ts_node_child_by_field_name(node, TS_FIELD("expression"));
+            bool is_func =
+                !ts_node_is_null(val) && strcmp(ts_node_type(val), "function_expression") == 0;
+            if (!is_func) {
+                TSNode attrpath = ts_node_child_by_field_name(node, TS_FIELD("attrpath"));
+                if (!ts_node_is_null(attrpath)) {
+                    push_var_def(ctx, cbm_node_text(a, attrpath, ctx->source), node);
+                }
+            }
+        }
+        uint32_t count = ts_node_child_count(node);
+        for (int i = (int)count - SKIP_CHAR; i >= 0; i--) {
+            TSNode child = ts_node_child(node, (uint32_t)i);
+            if (!ts_node_is_null(child)) {
+                ts_nstack_push(&stack, ctx->arena, child);
+            }
+        }
+    }
+}
+
 static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     if (!spec->variable_node_types || !spec->variable_node_types[0]) {
+        return;
+    }
+
+    // Nix: bindings nest inside attrsets/let-expressions; walk the whole tree.
+    if (ctx->language == CBM_LANG_NIX) {
+        walk_nix_bindings(ctx, root);
         return;
     }
 
@@ -6280,10 +6321,14 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
                 // Ada subprograms nest (a procedure body's declarative part can
                 // contain inner subprogram bodies); descend so the nested defs
                 // are captured and same-file calls to them resolve to a CALLS edge.
+                // Nix lambdas nest: a file-level `{ ... }:` module-args lambda wraps a
+                // body whose bindings are themselves lambdas (e.g. the dendritic
+                // `flake.modules.darwin.<name> = { ... }: { ... }`). Descend so those
+                // named inner lambdas are captured instead of stopping at the outer one.
                 bool descend_into_func =
                     (ctx->language == CBM_LANG_WOLFRAM || ctx->language == CBM_LANG_TYPESCRIPT ||
                      ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TSX ||
-                     ctx->language == CBM_LANG_ADA);
+                     ctx->language == CBM_LANG_ADA || ctx->language == CBM_LANG_NIX);
                 if (!descend_into_func) {
                     continue;
                 }
