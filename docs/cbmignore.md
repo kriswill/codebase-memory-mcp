@@ -67,9 +67,15 @@ Discovery applies its filters in a fixed order — the first layer that rejects
 a path wins. For directories:
 
 1. **Built-in skip list** — `.git`, `node_modules`, `dist`, `target`,
-   `vendor`, tool caches, etc. (60+ names; the fast/moderate index modes add
-   more, e.g. `docs`, `examples`, `testdata`). Not overridable from any
-   ignore file today.
+   `vendor`, tool caches, etc. (60+ names). The **fast/moderate** index modes
+   skip additional directories that usually hold non-core code — including
+   `scripts`, `tools`, `bin`, `build`, `out`, `docs`, `examples`, `testdata`,
+   `fixtures`, `migrations`, `e2e` — while **full** mode indexes them. A
+   `.cbmignore` negation whose rule is the last match for the directory
+   (e.g. `!scripts/`) un-skips a built-in entry, except the non-negatable
+   safety core (`.git`, `node_modules`, `.worktrees`, `.claude-worktrees`).
+   Directory names starting with `_` are NOT skipped (only the literal
+   `_opam` cache is).
 2. **Repo `.gitignore`** — `<repo>/.gitignore` merged with
    `<git-common-dir>/info/exclude` (worktree-aware); later patterns win on
    conflict. Honored even when the indexed directory is not a git repo root.
@@ -96,26 +102,22 @@ always skipped.
   walk never descends into it — you cannot re-include a file whose parent
   directory is excluded. Negate the directory itself if you need its
   contents.
-- **Across layers**: a `.cbmignore` negation overrides the **git global
-  excludes** layer only. Example: your `~/.config/git/ignore` ignores
-  `*.sql`, but this project's SQL should be indexed — add `!*.sql` to
-  `.cbmignore`. Negation cannot override the built-in skip lists, the repo
-  `.gitignore`/`info/exclude`, nested `.gitignore` files, the built-in
-  suffix/filename filters, or the size cap.
+- **Across layers**: a `.cbmignore` negation overrides two layers:
+  - the **git global excludes** layer. Example: your `~/.config/git/ignore`
+    ignores `*.sql`, but this project's SQL should be indexed — add `!*.sql`
+    to `.cbmignore`;
+  - the **ordinary built-in skip directories** (#500) — `!scripts/`,
+    `!obj/`, `!dist/`, … un-skip a built-in (or fast/moderate-mode) skip-list
+    directory, so build-output-like directories that actually contain source
+    can be indexed. A small safety core stays non-negatable by design —
+    `.git`, `node_modules`, and worktree-internal directories — because
+    indexing them risks OOM and correctness issues (see issues #489/#802).
+
+  Negation cannot override the repo `.gitignore`/`info/exclude`, nested
+  `.gitignore` files, the built-in suffix/filename filters, or the size cap.
 
 ### Planned (not yet implemented)
 
-The negation story is being unified; none of the following works yet:
-
-- `!` in `.cbmignore` will be able to un-skip ordinary built-in skip
-  directories (`obj/`, `dist/`, `target/`, …) so build-output-like
-  directories that actually contain source can be indexed.
-- A small safety core stays non-negatable by design — `.git`,
-  `node_modules`, and worktree-internal directories — because indexing them
-  risks OOM and correctness issues (see issue #489).
 - Auxiliary filesystem walkers will honor the same ignore predicate as
   discovery, so every code path sees an identical ignore decision
   (unification tracked in a follow-up issue).
-
-Until these land, the "Precedence" and "Negation — current behavior" sections
-above describe the actual behavior.

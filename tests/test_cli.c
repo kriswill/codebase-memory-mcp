@@ -2445,7 +2445,26 @@ TEST(cli_hook_gate_script_no_predictable_tmp_issue384) {
     if (!cbm_mkdtemp(tmpdir))
         FAIL("cbm_mkdtemp failed");
 
+    /* Pin CLAUDE_CONFIG_DIR to the sandbox: the installer honors that env var
+     * over the passed home dir, so running the suite inside a Claude Code
+     * session (which exports it) would otherwise write the gate script into
+     * the developer's REAL config dir and fail the read below. */
+    char cfg_sandbox[512];
+    snprintf(cfg_sandbox, sizeof(cfg_sandbox), "%s/.claude", tmpdir);
+    char saved_cfg[512] = "";
+    const char *prev_cfg = getenv("CLAUDE_CONFIG_DIR");
+    if (prev_cfg) {
+        snprintf(saved_cfg, sizeof(saved_cfg), "%s", prev_cfg);
+    }
+    cbm_setenv("CLAUDE_CONFIG_DIR", cfg_sandbox, 1);
+
     cbm_install_hook_gate_script(tmpdir, "/usr/local/bin/codebase-memory-mcp");
+
+    if (saved_cfg[0]) {
+        cbm_setenv("CLAUDE_CONFIG_DIR", saved_cfg, 1);
+    } else {
+        cbm_unsetenv("CLAUDE_CONFIG_DIR");
+    }
 
     char script_path[512];
     snprintf(script_path, sizeof(script_path), "%s/.claude/hooks/cbm-code-discovery-gate", tmpdir);

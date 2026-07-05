@@ -7,6 +7,8 @@
 #include "test_framework.h"
 #include <store/store.h>
 #include <sqlite3.h>
+#include "foundation/compat.h"
+#include "foundation/compat_fs.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1010,6 +1012,100 @@ TEST(store_integrity_null_check) {
     PASS();
 }
 
+/* Build a file-backed multi-page DB, then overwrite the middle third of the
+ * file so table pages fail btreeInitPage — the shape of the torn-artifact
+ * corruption that shipped in a real dotfiles graph.db.zst. Returns the
+ * malloc'd db path (caller frees + unlinks). */
+static char *make_page_corrupted_db(void) {
+    char tmpl[512];
+    snprintf(tmpl, sizeof(tmpl), "%s/cbm_test_corrupt_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpl)) {
+        return NULL;
+    }
+    char *path = malloc(1024);
+    snprintf(path, 1024, "%s/corrupt.db", tmpl);
+
+    cbm_store_t *s = cbm_store_open_path(path);
+    if (!s) {
+        free(path);
+        return NULL;
+    }
+    cbm_store_upsert_project(s, "test-proj", "/tmp/test");
+    char props[1200];
+    memset(props, 'x', sizeof(props) - 1);
+    props[sizeof(props) - 1] = '\0';
+    cbm_store_begin(s);
+    for (int i = 0; i < 400; i++) {
+        char sql[1600];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO nodes(project, label, name, qualified_name, file_path, properties) "
+                 "VALUES('test-proj', 'Function', 'f%d', 'test-proj.f%d', 'a.c', "
+                 "'{\"pad\":\"%s\"}');",
+                 i, i, props);
+        cbm_store_exec(s, sql);
+    }
+    cbm_store_commit(s);
+    cbm_store_close(s); /* clean close checkpoints the WAL into the main file */
+
+    FILE *fp = fopen(path, "r+b");
+    if (fp) {
+        fseek(fp, 0, SEEK_END);
+        long size = ftell(fp);
+        long start = size / 3;
+        long len = size / 3;
+        char junk[4096];
+        memset(junk, 0xAA, sizeof(junk));
+        fseek(fp, start, SEEK_SET);
+        for (long off = 0; off < len; off += (long)sizeof(junk)) {
+            fwrite(junk, 1, sizeof(junk), fp);
+        }
+        fclose(fp);
+    }
+    return path;
+}
+
+TEST(store_integrity_detects_page_corruption) {
+    /* Regression: the integrity check only inspected the projects table, so
+     * a page-corrupted DB (torn artifact import) passed and got served —
+     * with every row scan silently truncating. quick_check must catch it. */
+    char *path = make_page_corrupted_db();
+    ASSERT_NOT_NULL(path);
+    cbm_store_t *s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s); /* page 1 is intact, so the open itself succeeds */
+    ASSERT_FALSE(cbm_store_check_integrity(s));
+    cbm_store_close(s);
+    cbm_unlink(path);
+    free(path);
+    PASS();
+}
+
+TEST(store_corrupt_scan_returns_error_not_partial_rows) {
+    /* Regression: `while (sqlite3_step(stmt) == SQLITE_ROW)` treated a
+     * SQLITE_CORRUPT mid-scan exactly like a clean end of results — a label
+     * scan over the corrupted dotfiles DB returned 64 of 379 rows with rc==OK.
+     * A dying scan must return CBM_STORE_ERR and no partial rows. */
+    char *path = make_page_corrupted_db();
+    ASSERT_NOT_NULL(path);
+    cbm_store_t *s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s);
+
+    cbm_node_t *nodes = NULL;
+    int n = 0;
+    int rc = cbm_store_find_nodes_by_label(s, "test-proj", "Function", &nodes, &n);
+    ASSERT_EQ(rc, CBM_STORE_ERR);
+    ASSERT_EQ(n, 0);
+    ASSERT_NULL(nodes);
+    /* The failure must be recorded so batch callers (Cypher executor) can
+     * detect it via the error generation counter. */
+    ASSERT_GT(cbm_store_error_generation(s), 0);
+    ASSERT_TRUE(strlen(cbm_store_error(s)) > 0);
+
+    cbm_store_close(s);
+    cbm_unlink(path);
+    free(path);
+    PASS();
+}
+
 /* ── Edge case: NULL / empty field handling ────────────────────── */
 
 TEST(store_node_null_project) {
@@ -1546,6 +1642,8 @@ SUITE(store_nodes) {
     RUN_TEST(store_integrity_corrupt_bad_path);
     RUN_TEST(store_integrity_windows_lowercase_drive_issue367);
     RUN_TEST(store_integrity_corrupt_too_many_rows);
+    RUN_TEST(store_integrity_detects_page_corruption);
+    RUN_TEST(store_corrupt_scan_returns_error_not_partial_rows);
     RUN_TEST(store_integrity_null_check);
     RUN_TEST(store_project_crud);
     RUN_TEST(store_project_update);

@@ -248,13 +248,19 @@ static int64_t create_svc_route_node(cbm_pipeline_ctx_t *ctx, const char *url, c
         prefix = broker ? broker : "async";
     }
     snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", prefix, qpath);
-    const char *rp;
-    if (svc == CBM_SVC_HTTP) {
-        rp = method ? method : "{}";
+    /* Properties must be JSON, mirroring build_service_route on the parallel
+     * path — the raw method/broker string here produced Route nodes whose
+     * properties column failed json_valid(), aborting PRAGMA quick_check
+     * (generated-column recomputation) and any json_extract over them. */
+    char route_props[CBM_SZ_256];
+    if (svc == CBM_SVC_HTTP && method) {
+        snprintf(route_props, sizeof(route_props), "{\"method\":\"%s\"}", method);
+    } else if (svc != CBM_SVC_HTTP && broker) {
+        snprintf(route_props, sizeof(route_props), "{\"broker\":\"%s\"}", broker);
     } else {
-        rp = broker ? broker : "{}";
+        snprintf(route_props, sizeof(route_props), "{}");
     }
-    return cbm_gbuf_upsert_node(ctx->gbuf, "Route", url, route_qn, "", 0, 0, rp);
+    return cbm_gbuf_upsert_node(ctx->gbuf, "Route", url, route_qn, "", 0, 0, route_props);
 }
 
 /* Insert an edge, splicing the call-site line (,"line":N) in before the closing
@@ -363,15 +369,13 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
     cbm_json_escape(esc_callee, sizeof(esc_callee), call->callee_name);
     cbm_json_escape(esc_url, sizeof(esc_url), url_or_topic);
     char props[CBM_SZ_512];
-    snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"url_path\":\"%s\"%s%s%s%s%s}", esc_callee,
-             esc_url, method ? ",\"method\":\"" : "", method ? method : "", method ? "\"" : "",
-             broker ? ",\"broker\":\"" : "", broker ? broker : "");
-    if (broker) {
-        size_t plen = strlen(props);
-        if (plen > 0 && props[plen - SKIP_ONE] != '}') {
-            snprintf(props + plen - 1, sizeof(props) - plen + SKIP_ONE, "\"}");
-        }
-    }
+    /* The broker field needs its own closing quote, exactly like method —
+     * the old format left it unterminated ("broker":"bullmq}), making every
+     * brokered ASYNC_CALLS edge's properties malformed JSON. */
+    snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"url_path\":\"%s\"%s%s%s%s%s%s}",
+             esc_callee, esc_url, method ? ",\"method\":\"" : "", method ? method : "",
+             method ? "\"" : "", broker ? ",\"broker\":\"" : "", broker ? broker : "",
+             broker ? "\"" : "");
     calls_emit_edge(ctx->gbuf, source->id, route_id, edge_type, props, sizeof(props), call);
 }
 

@@ -2807,7 +2807,7 @@ TEST(git_context_linked_worktree) {
     ASSERT_EQ(run_cmd(cmd), 0);
     snprintf(cmd, sizeof(cmd),
              "git -C \"%s\" -c user.name=\"CBM Test\" -c user.email=\"cbm@example.invalid\" "
-             "commit -m \"initial\" >%s 2>&1",
+             "-c commit.gpgsign=false commit -m \"initial\" >%s 2>&1",
              repo, null_dev);
     ASSERT_EQ(run_cmd(cmd), 0);
     snprintf(cmd, sizeof(cmd), "git -C \"%s\" worktree add -b feature/git-context \"%s\" >%s 2>&1",

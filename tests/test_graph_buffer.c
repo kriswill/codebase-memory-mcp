@@ -7,6 +7,10 @@
 #include "test_framework.h"
 #include "graph_buffer/graph_buffer.h"
 #include "store/store.h"
+#include "foundation/compat.h"
+#include "foundation/compat_fs.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── Node operations ───────────────────────────────────────────── */
@@ -414,6 +418,77 @@ TEST(gbuf_many_nodes) {
     ASSERT_STR_EQ(n->name, "func_500");
 
     cbm_gbuf_free(gb);
+    PASS();
+}
+
+/* Regression (torn dotfiles artifact): the dump writes a brand-new DB file
+ * at the target path, but SQLite replays a leftover <path>-wal onto whatever
+ * main file sits at <path> — a stale WAL from a previous store generation
+ * spliced old pages into the fresh file, corrupting indexes and table pages.
+ * The dump must remove stale WAL/SHM sidecars before writing. */
+TEST(gbuf_dump_removes_stale_wal) {
+    char tmpl[512];
+    snprintf(tmpl, sizeof(tmpl), "%s/cbm_test_gbuf_wal_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpl));
+    char db_path[1024];
+    snprintf(db_path, sizeof(db_path), "%s/gen.db", tmpl);
+    char wal_path[1024];
+    snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+
+    /* Generation A: real store; capture its hot WAL bytes mid-session. */
+    cbm_store_t *a = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(a);
+    cbm_store_upsert_project(a, "gen-a", "/tmp/gen-a");
+    for (int i = 0; i < 50; i++) {
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO nodes(project, label, name, qualified_name, file_path, properties) "
+                 "VALUES('gen-a', 'Function', 'a%d', 'gen-a.a%d', 'a.c', "
+                 "'{\"pad\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}');",
+                 i, i);
+        cbm_store_exec(a, sql);
+    }
+    size_t wal_size = 0;
+    char *wal_bytes = NULL;
+    {
+        FILE *wf = fopen(wal_path, "rb");
+        ASSERT_NOT_NULL(wf); /* hot WAL must exist while the store is open */
+        fseek(wf, 0, SEEK_END);
+        wal_size = (size_t)ftell(wf);
+        fseek(wf, 0, SEEK_SET);
+        wal_bytes = malloc(wal_size);
+        ASSERT_EQ(fread(wal_bytes, 1, wal_size, wf), wal_size);
+        fclose(wf);
+    }
+    ASSERT_GT((int)wal_size, 1000); /* real frames, not just a header */
+    cbm_store_close(a);             /* clean close checkpoints + deletes the WAL */
+
+    /* Simulate the crashed-session leftover: restore the stale gen-A WAL. */
+    {
+        FILE *wf = fopen(wal_path, "wb");
+        ASSERT_NOT_NULL(wf);
+        fwrite(wal_bytes, 1, wal_size, wf);
+        fclose(wf);
+    }
+    free(wal_bytes);
+
+    /* Generation B: dump a fresh 2-node graph over the same path. */
+    cbm_gbuf_t *gb = cbm_gbuf_new("gen-b", "/tmp");
+    cbm_gbuf_upsert_node(gb, "Function", "main", "gen-b.main", "main.go", 1, 10, "{}");
+    cbm_gbuf_upsert_node(gb, "Function", "help", "gen-b.help", "help.go", 1, 5, "{}");
+    ASSERT_EQ(cbm_gbuf_dump_to_sqlite(gb, db_path), 0);
+    cbm_gbuf_free(gb);
+
+    /* Open with SQLite: without the sidecar cleanup, gen-A WAL frames are
+     * recovered on top of the gen-B file here. */
+    cbm_store_t *b = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(b);
+    ASSERT_TRUE(cbm_store_check_integrity(b));
+    ASSERT_EQ(cbm_store_count_nodes(b, "gen-b"), 2);
+    ASSERT_EQ(cbm_store_count_nodes(b, "gen-a"), 0);
+    cbm_store_close(b);
+
+    cbm_unlink(db_path);
     PASS();
 }
 
@@ -1030,6 +1105,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_delete_edges_by_type);
     RUN_TEST(gbuf_edge_count_by_type);
     RUN_TEST(gbuf_dump_empty);
+    RUN_TEST(gbuf_dump_removes_stale_wal);
     RUN_TEST(gbuf_flush_to_store);
     RUN_TEST(gbuf_many_nodes);
 

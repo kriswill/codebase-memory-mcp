@@ -423,9 +423,19 @@ static const char *DROP_INDEXES_SQL = "DROP INDEX IF EXISTS idx_nodes_label;"
 
 /* ── Export helpers ───────────────────────────────────────────────── */
 
-/* Prepare a stripped DB copy for best-quality export.
- * VACUUM INTO → drop indexes → VACUUM. Returns malloc'd buffer or NULL. */
-static char *prepare_stripped_db(const char *db_path, size_t *out_size) {
+/* Prepare a consistent DB snapshot for export via VACUUM INTO. Reading the
+ * .db file bytes directly is NEVER safe here: the store runs in WAL mode, so
+ * the main file alone can be missing committed transactions still in the WAL
+ * and can even be mid-checkpoint — a raw copy of it produced artifacts whose
+ * secondary indexes were short and whose table pages failed btreeInitPage
+ * (the dotfiles graph.db.zst corruption). VACUUM INTO reads through the
+ * connection, so the copy includes WAL content and is transactionally
+ * consistent; it also fails loudly (SQLITE_CORRUPT) if the source is damaged,
+ * so a bad DB can't be published as an artifact.
+ * strip_indexes additionally drops user indexes for better compression
+ * (best-quality export; import rebuilds them). Returns malloc'd buffer or
+ * NULL. */
+static char *prepare_snapshot_db(const char *db_path, size_t *out_size, bool strip_indexes) {
     char tmp_path[CBM_SZ_4K];
     snprintf(tmp_path, sizeof(tmp_path), "%s/cbm_artifact_tmp.db", cbm_tmpdir());
     cbm_unlink(tmp_path);
@@ -454,11 +464,13 @@ static char *prepare_stripped_db(const char *db_path, size_t *out_size) {
     }
 
     /* Strip indexes from the copy for better compression. */
-    sqlite3 *tmp_db = NULL;
-    if (sqlite3_open_v2(tmp_path, &tmp_db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
-        sqlite3_exec(tmp_db, DROP_INDEXES_SQL, NULL, NULL, NULL);
-        sqlite3_exec(tmp_db, "VACUUM;", NULL, NULL, NULL);
-        sqlite3_close(tmp_db);
+    if (strip_indexes) {
+        sqlite3 *tmp_db = NULL;
+        if (sqlite3_open_v2(tmp_path, &tmp_db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+            sqlite3_exec(tmp_db, DROP_INDEXES_SQL, NULL, NULL, NULL);
+            sqlite3_exec(tmp_db, "VACUUM;", NULL, NULL, NULL);
+            sqlite3_close(tmp_db);
+        }
     }
 
     char *data = read_file_alloc(tmp_path, out_size);
@@ -506,11 +518,14 @@ int cbm_artifact_export(const char *db_path, const char *repo_path, const char *
     char *db_data = NULL;
     int compression_level = ART_ZSTD_FAST;
 
+    /* Both qualities snapshot via VACUUM INTO — see prepare_snapshot_db for
+     * why a raw byte-copy of a live WAL-mode DB is never safe. "fast" only
+     * skips the index stripping + re-VACUUM and uses a lighter zstd level. */
     if (quality == CBM_ARTIFACT_BEST) {
         compression_level = ART_ZSTD_BEST;
-        db_data = prepare_stripped_db(db_path, &db_size);
+        db_data = prepare_snapshot_db(db_path, &db_size, true);
     } else {
-        db_data = read_file_alloc(db_path, &db_size);
+        db_data = prepare_snapshot_db(db_path, &db_size, false);
     }
 
     if (!db_data || db_size == 0) {
@@ -675,6 +690,18 @@ int cbm_artifact_import(const char *repo_path, const char *cache_db_path) {
 
     cbm_store_close(store);
 
+    /* Remove the DESTINATION's stale WAL/SHM before installing the imported
+     * file. SQLite replays <path>-wal onto whatever main file sits at <path>
+     * based on the sidecar's own header alone — a leftover WAL from the
+     * previous DB generation would be recovered on top of the imported copy,
+     * splicing old pages into it and corrupting it. */
+    char wal[CBM_SZ_4K];
+    char shm[CBM_SZ_4K];
+    snprintf(wal, sizeof(wal), "%s-wal", cache_db_path);
+    snprintf(shm, sizeof(shm), "%s-shm", cache_db_path);
+    cbm_unlink(wal);
+    cbm_unlink(shm);
+
     /* Atomic rename to final path */
     if (rename(tmp_path, cache_db_path) != 0) {
         cbm_log_error("artifact.import", "err", "rename_to_cache");
@@ -683,8 +710,6 @@ int cbm_artifact_import(const char *repo_path, const char *cache_db_path) {
     }
 
     /* Clean up any stale WAL/SHM from the temp open */
-    char wal[CBM_SZ_4K];
-    char shm[CBM_SZ_4K];
     snprintf(wal, sizeof(wal), "%s-wal", tmp_path);
     snprintf(shm, sizeof(shm), "%s-shm", tmp_path);
     cbm_unlink(wal);

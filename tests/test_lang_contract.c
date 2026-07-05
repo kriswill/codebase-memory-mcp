@@ -1172,9 +1172,8 @@ TEST(contract_edge_imports_alias_no_phantom_folder_edge_issue767) {
                           "      \"@lib\": [\"./src/lib\"],\n"
                           "      \"@lib/*\": [\"./src/lib/*\"]\n    }\n  }\n}\n"},
         {"src/lib/thing.ts", "export const Thing = {};\n"},
-        {"src/consumer.ts",
-         "import { ClientC } from '@lib/external-pkg';\n\n"
-         "export function useClient() {\n  return new ClientC();\n}\n"}};
+        {"src/consumer.ts", "import { ClientC } from '@lib/external-pkg';\n\n"
+                            "export function useClient() {\n  return new ClientC();\n}\n"}};
     cbm_store_t *store = lang_index_files(&lp, f, 3);
     int got = store ? cbm_store_count_edges_by_type(store, lp.project, "IMPORTS") : -1;
     if (got != 0) {
@@ -1195,9 +1194,8 @@ TEST(contract_edge_imports_alias_resolves_real_file_issue767) {
                           "      \"@lib\": [\"./src/lib\"],\n"
                           "      \"@lib/*\": [\"./src/lib/*\"]\n    }\n  }\n}\n"},
         {"src/lib/thing.ts", "export const Thing = {};\n"},
-        {"src/consumer.ts",
-         "import { Thing } from '@lib/thing';\n\n"
-         "export function useThing() {\n  return Thing;\n}\n"}};
+        {"src/consumer.ts", "import { Thing } from '@lib/thing';\n\n"
+                            "export function useThing() {\n  return Thing;\n}\n"}};
     ASSERT_TRUE(edge_present(f, 3, "IMPORTS", 1));
     PASS();
 }
@@ -1310,7 +1308,9 @@ TEST(contract_edge_parallel_service_edges) {
  * works under both POSIX shells and cmd.exe. Returns the command exit status. */
 static int run_git(const char *dir, const char *args) {
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "git -C \"%s\" %s", dir, args);
+    /* -c commit.gpgsign=false: a developer's global signing config must not
+     * fail the commit (signing agents are unreachable in sandboxed runs). */
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" -c commit.gpgsign=false %s", dir, args);
     return system(cmd);
 }
 

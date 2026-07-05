@@ -28,6 +28,7 @@ enum {
 #include "sqlite_writer.h"
 #include "foundation/hash_table.h"
 #include "foundation/compat.h"
+#include "foundation/compat_fs.h"
 #include "foundation/log.h"
 #include "foundation/dyn_array.h"
 #include "foundation/profile.h"
@@ -1521,6 +1522,20 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
 
     char indexed_at[CBM_SZ_64];
     generate_iso_timestamp(indexed_at, sizeof(indexed_at));
+
+    /* The writer creates a brand-new database file, but SQLite decides whether
+     * to replay <path>-wal purely from that sidecar's own header — a stale WAL
+     * left by a previous connection (crashed session, or a checkpoint that
+     * never ran) would be recovered ON TOP of the fresh file at the next open,
+     * splicing old-generation pages into it and corrupting every index. Remove
+     * the sidecars before writing so the new DB starts with a clean slate. */
+    {
+        char sidecar[CBM_SZ_1K];
+        snprintf(sidecar, sizeof(sidecar), "%s-wal", path);
+        (void)cbm_unlink(sidecar);
+        snprintf(sidecar, sizeof(sidecar), "%s-shm", path);
+        (void)cbm_unlink(sidecar);
+    }
 
     /* Stream node rows to the DB in partitions. Under memory pressure, free each
      * partition's heavy properties_json once persisted — the heavy column is
