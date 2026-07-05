@@ -1500,6 +1500,26 @@ static int parse_string_func_item(parser_t *p, cbm_return_item_t *item) {
     return 0;
 }
 
+static void free_case_expr(cbm_case_expr_t *k);
+
+/* Release everything a partially-parsed return item owns (error paths). */
+static void free_return_item_fields(cbm_return_item_t *item) {
+    safe_str_free(&item->variable);
+    safe_str_free(&item->property);
+    safe_str_free(&item->alias);
+    safe_str_free(&item->func);
+    free_case_expr(item->kase);
+    item->kase = NULL;
+    for (int j = 0; j < item->arg_count; j++) {
+        safe_str_free(&item->args[j].variable);
+        safe_str_free(&item->args[j].property);
+        safe_str_free(&item->args[j].literal);
+    }
+    free(item->args);
+    item->args = NULL;
+    item->arg_count = 0;
+}
+
 static int parse_return_item(parser_t *p, cbm_return_item_t *item) {
     memset(item, 0, sizeof(*item));
     int rc = 0;
@@ -1521,25 +1541,29 @@ static int parse_return_item(parser_t *p, cbm_return_item_t *item) {
     if (rc < 0) {
         return CBM_NOT_FOUND;
     }
+    /* '[' after ANY item — n.tags[0] or labels(n)[0] alike — begins list
+     * indexing/slicing we don't support. Silently dropping the subscript (and
+     * with it the rest of the clause) produces a valid-looking but wrong
+     * result, so fail loudly (#373). */
+    if (check(p, TOK_LBRACKET)) {
+        snprintf(p->error, sizeof(p->error),
+                 "unsupported expression: list indexing/slicing '[...]' is not supported");
+        free_return_item_fields(item);
+        return CBM_NOT_FOUND;
+    }
     /* A bare identifier followed by '(' is a function we don't recognise
-     * (recognised aggregates / string funcs / scalar funcs are handled above),
-     * and '[' begins list indexing/slicing we don't support. Rather than
-     * silently projecting an empty column — which looks like a valid but blank
-     * result and hides the real problem — fail loudly with a clear message so
-     * the caller knows the query used an unsupported feature (#373). */
-    if (!item->func && !item->kase && (check(p, TOK_LPAREN) || check(p, TOK_LBRACKET))) {
-        if (check(p, TOK_LPAREN)) {
-            snprintf(p->error, sizeof(p->error),
-                     "unsupported function '%s' (supported: count, sum, avg, min, max, collect, "
-                     "toLower, toUpper, toString, toInteger, toFloat, toBoolean, size, length, "
-                     "trim, ltrim, rtrim, reverse, labels, type, id, keys, properties)",
-                     item->variable ? item->variable : "?");
-        } else {
-            snprintf(p->error, sizeof(p->error),
-                     "unsupported expression: list indexing/slicing '[...]' is not supported");
-        }
-        safe_str_free(&item->variable);
-        safe_str_free(&item->property);
+     * (recognised aggregates / string funcs / scalar funcs are handled above).
+     * Rather than silently projecting an empty column — which looks like a
+     * valid but blank result and hides the real problem — fail loudly with a
+     * clear message so the caller knows the query used an unsupported
+     * feature (#373). */
+    if (!item->func && !item->kase && check(p, TOK_LPAREN)) {
+        snprintf(p->error, sizeof(p->error),
+                 "unsupported function '%s' (supported: count, sum, avg, min, max, collect, "
+                 "toLower, toUpper, toString, toInteger, toFloat, toBoolean, size, length, "
+                 "trim, ltrim, rtrim, reverse, labels, type, id, keys, properties)",
+                 item->variable ? item->variable : "?");
+        free_return_item_fields(item);
         return CBM_NOT_FOUND;
     }
     /* Optional AS alias */
@@ -1822,6 +1846,27 @@ static int parse_post_where(parser_t *p, cbm_query_t *q, // NOLINT(misc-no-recur
         q->union_next = sub.query;
         sub.query = NULL;
         cbm_parse_free(&sub);
+        /* The recursive parse consumed and validated everything after UNION
+         * (including its own trailing-token check), so we are done. */
+        return 0;
+    }
+    /* Anything still unconsumed here is syntax the parser doesn't understand.
+     * Silently ignoring the tail turns typos and unsupported constructs into
+     * plausible-looking wrong results — e.g. `RETURN labels(n)[0], n.name
+     * LIMIT 5` used to drop the subscript, the second column AND the LIMIT —
+     * so reject the query instead. */
+    if (!check(p, TOK_EOF)) {
+        const cbm_token_t *t = peek(p);
+        const char *trailing_unsup = unsupported_clause_error(t->type);
+        if (trailing_unsup) {
+            snprintf(p->error, sizeof(p->error), "%s", trailing_unsup);
+        } else {
+            snprintf(p->error, sizeof(p->error),
+                     "unexpected token '%s' at position %d: the remainder of the query could not "
+                     "be parsed",
+                     (t->text && t->text[0]) ? t->text : "?", t->pos);
+        }
+        return CBM_NOT_FOUND;
     }
     return 0;
 }
