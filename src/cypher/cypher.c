@@ -28,6 +28,7 @@ enum {
     CYP_NODE_COLS = 4, /* columns per node var: name, qn, label, file */
     CYP_EDGE_COLS = 3, /* columns per edge var: name, qn, label */
     CYP_COL_BUF = 48,  /* max column buffer (16 vars * 3 cols) */
+    CYP_ERR_BUF = 768, /* store-error message buffer (512 errbuf + hint) */
     CYP_FOUND_NONE = -1,
     /* search miss sentinel */ /* mask for ebuf ring buffer (8 entries) */
 };
@@ -4454,6 +4455,13 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
         return CBM_NOT_FOUND;
     }
 
+    /* Snapshot the store's error generation: the executor issues many store
+     * calls without checking each return code, and a scan that dies mid-way
+     * (e.g. SQLITE_CORRUPT from a damaged page) used to be indistinguishable
+     * from a clean empty result — MATCH (f:Flake) RETURN count(f) silently
+     * returned zero rows against a corrupted index. */
+    int err_gen0 = cbm_store_error_generation(store);
+
     result_builder_t rb = {0};
     // cppcheck-suppress knownConditionTrueFalse
     if (execute_single(store, q, project, max_rows, &rb) < 0) {
@@ -4491,6 +4499,21 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
         rb_free(&rb);
         cbm_query_free(q);
         out->error = heap_strdup("result exceeded 100k rows — use narrower filters or add LIMIT");
+        return CBM_NOT_FOUND;
+    }
+
+    /* Any store error during execution means the rows above are untrustworthy
+     * (typically a truncated scan over a corrupted database). Fail loudly
+     * instead of returning partial/empty results. */
+    if (cbm_store_error_generation(store) != err_gen0) {
+        rb_free(&rb);
+        cbm_query_free(q);
+        char msg[CYP_ERR_BUF];
+        snprintf(msg, sizeof(msg),
+                 "store error during query execution: %s — the project database may be "
+                 "corrupted; run index_repository to rebuild it",
+                 cbm_store_error(store));
+        out->error = heap_strdup(msg);
         return CBM_NOT_FOUND;
     }
 

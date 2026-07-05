@@ -7,8 +7,11 @@
 #include "test_framework.h"
 #include <cypher/cypher.h>
 #include <store/store.h>
+#include "foundation/compat.h"
+#include "foundation/compat_fs.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 /* ══════════════════════════════════════════════════════════════════
  *  LEXER TESTS
@@ -2510,14 +2513,71 @@ TEST(cypher_multi_prop_projection_no_alias) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(r.row_count, 1);
     ASSERT_EQ(r.col_count, 6);
-    ASSERT_STR_EQ(r.rows[0][0], "1"); /* loop_depth — NOT the suffix transitive_loop_depth */
-    ASSERT_STR_EQ(r.rows[0][1], "5"); /* transitive_loop_depth */
-    ASSERT_STR_EQ(r.rows[0][2], "7"); /* cognitive */
-    ASSERT_STR_EQ(r.rows[0][3], "3"); /* complexity */
+    ASSERT_STR_EQ(r.rows[0][0], "1");  /* loop_depth — NOT the suffix transitive_loop_depth */
+    ASSERT_STR_EQ(r.rows[0][1], "5");  /* transitive_loop_depth */
+    ASSERT_STR_EQ(r.rows[0][2], "7");  /* cognitive */
+    ASSERT_STR_EQ(r.rows[0][3], "3");  /* complexity */
     ASSERT_STR_EQ(r.rows[0][4], "10"); /* start_line (computed) */
     ASSERT_STR_EQ(r.rows[0][5], "42"); /* end_line (computed) — distinct from start_line */
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
+    PASS();
+}
+
+/* Regression (torn dotfiles artifact): a store scan dying mid-way (e.g.
+ * SQLITE_CORRUPT from a damaged page) used to look like a clean empty
+ * result — `MATCH (f:Flake) RETURN count(f)` returned zero rows and label
+ * scans returned silently truncated subsets. The executor must surface any
+ * store error recorded during execution as a query error instead. */
+TEST(cypher_corrupt_store_query_errors) {
+    char tmpl[512];
+    snprintf(tmpl, sizeof(tmpl), "%s/cbm_test_cy_corrupt_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpl));
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/corrupt.db", tmpl);
+
+    /* Multi-page DB: 400 Function nodes with ~1.2KB properties each. */
+    cbm_store_t *s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s);
+    cbm_store_upsert_project(s, "test-proj", "/tmp/test");
+    char props[1200];
+    memset(props, 'x', sizeof(props) - 1);
+    props[sizeof(props) - 1] = '\0';
+    cbm_store_begin(s);
+    for (int i = 0; i < 400; i++) {
+        char sql[1600];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO nodes(project, label, name, qualified_name, file_path, properties) "
+                 "VALUES('test-proj', 'Function', 'f%d', 'test-proj.f%d', 'a.c', "
+                 "'{\"pad\":\"%s\"}');",
+                 i, i, props);
+        cbm_store_exec(s, sql);
+    }
+    cbm_store_commit(s);
+    cbm_store_close(s);
+
+    /* Overwrite the middle third of the file — table pages become garbage. */
+    FILE *fp = fopen(path, "r+b");
+    ASSERT_NOT_NULL(fp);
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    char junk[4096];
+    memset(junk, 0xAA, sizeof(junk));
+    fseek(fp, size / 3, SEEK_SET);
+    for (long off = 0; off < size / 3; off += (long)sizeof(junk)) {
+        fwrite(junk, 1, sizeof(junk), fp);
+    }
+    fclose(fp);
+
+    s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s);
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s, "MATCH (f:Function) RETURN count(f)", "test-proj", 0, &r);
+    ASSERT_LT(rc, 0);
+    ASSERT_NOT_NULL(r.error);
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    cbm_unlink(path);
     PASS();
 }
 
@@ -2572,6 +2632,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_func_size_reverse);
     RUN_TEST(cypher_func_multiarg);
     RUN_TEST(cypher_multi_prop_projection_no_alias);
+    RUN_TEST(cypher_corrupt_store_query_errors);
     RUN_TEST(cypher_exists_no_callers);
     RUN_TEST(cypher_exists_has_outgoing_calls);
     RUN_TEST(cypher_exec_calls_relationship);

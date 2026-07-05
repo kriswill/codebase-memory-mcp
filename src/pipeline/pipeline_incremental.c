@@ -670,7 +670,14 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
 
     /* Auto-update artifact if one already exists (persistence was enabled previously) */
     if (repo_path && cbm_artifact_exists(repo_path)) {
-        cbm_artifact_export(db_path, repo_path, project, CBM_ARTIFACT_FAST);
+        int arc = cbm_artifact_export(db_path, repo_path, project, CBM_ARTIFACT_FAST);
+        if (arc != 0) {
+            /* Best-effort refresh: the stale artifact stays in place, but a
+             * failed export must not be silent — it previously hid the torn
+             * raw-copy exports that shipped corrupted artifacts. */
+            const char *err = cbm_artifact_export_last_error();
+            cbm_log_error("incremental.artifact_export", "err", err ? err : "unknown");
+        }
     }
 }
 

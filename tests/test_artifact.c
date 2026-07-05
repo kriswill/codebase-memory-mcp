@@ -8,6 +8,7 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/log.h"
+#include "zstd_store.h"
 
 #include <sys/stat.h>
 #include <stdio.h>
@@ -318,6 +319,165 @@ TEST(artifact_null_safety) {
     PASS();
 }
 
+/* Regression (dotfiles graph.db.zst corruption): the fast export used to
+ * read the raw bytes of the main .db file. In WAL mode the main file alone
+ * misses committed transactions still sitting in the -wal (and can even be
+ * mid-checkpoint), so the artifact was a torn snapshot: short indexes,
+ * unreadable table pages. Both export qualities must snapshot through a
+ * SQLite connection (VACUUM INTO) so WAL content is included. */
+TEST(artifact_export_fast_includes_hot_wal) {
+    setup_artifact_test();
+    create_test_db(g_db); /* 2 nodes; clean close checkpoints them */
+
+    /* Reopen and add rows WITHOUT closing: they are committed but live only
+     * in <db>-wal, not in the main file bytes. */
+    cbm_store_t *live = cbm_store_open_path(g_db);
+    ASSERT_NOT_NULL(live);
+    for (int i = 0; i < 100; i++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO nodes(project, label, name, qualified_name, file_path) "
+                 "VALUES('test-proj', 'Function', 'wal%d', 'test-proj.wal%d', 'wal.c');",
+                 i, i);
+        cbm_store_exec(live, sql);
+    }
+
+    /* Export while the writer connection is still open (hot WAL). */
+    int rc = cbm_artifact_export(g_db, g_repo, "test-proj", CBM_ARTIFACT_FAST);
+    ASSERT_EQ(rc, 0);
+    cbm_store_close(live);
+
+    char import_db[1024];
+    snprintf(import_db, sizeof(import_db), "%s/imported.db", g_tmpdir);
+    ASSERT_EQ(cbm_artifact_import(g_repo, import_db), 0);
+
+    cbm_store_t *s = cbm_store_open_path(import_db);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_count_nodes(s, "test-proj"), 102);
+    /* Row FETCHES (not just index-covered counts) must see every row. */
+    cbm_node_t *nodes = NULL;
+    int n = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "test-proj", "Function", &nodes, &n), CBM_STORE_OK);
+    ASSERT_EQ(n, 102);
+    cbm_store_free_nodes(nodes, n);
+    cbm_store_close(s);
+
+    cleanup_dir(g_tmpdir);
+    PASS();
+}
+
+/* Build a multi-page DB and overwrite the middle third of the file so table
+ * pages fail btreeInitPage — the same shape as the torn dotfiles artifact. */
+static void create_and_corrupt_db(const char *path) {
+    cbm_store_t *s = cbm_store_open_path(path);
+    if (!s) {
+        return;
+    }
+    cbm_store_exec(s, "INSERT OR IGNORE INTO projects(name, indexed_at, root_path) "
+                      "VALUES('test-proj', '2026-01-01', '/tmp/test');");
+    char props[1200];
+    memset(props, 'x', sizeof(props) - 1);
+    props[sizeof(props) - 1] = '\0';
+    cbm_store_begin(s);
+    for (int i = 0; i < 400; i++) {
+        char sql[1600];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO nodes(project, label, name, qualified_name, file_path, properties) "
+                 "VALUES('test-proj', 'Function', 'f%d', 'test-proj.f%d', 'a.c', "
+                 "'{\"pad\":\"%s\"}');",
+                 i, i, props);
+        cbm_store_exec(s, sql);
+    }
+    cbm_store_commit(s);
+    cbm_store_close(s); /* clean close checkpoints the WAL into the main file */
+
+    FILE *fp = fopen(path, "r+b");
+    if (!fp) {
+        return;
+    }
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    long start = size / 3;
+    long len = size / 3;
+    char junk[4096];
+    memset(junk, 0xAA, sizeof(junk));
+    fseek(fp, start, SEEK_SET);
+    for (long off = 0; off < len; off += (long)sizeof(junk)) {
+        fwrite(junk, 1, sizeof(junk), fp);
+    }
+    fclose(fp);
+}
+
+/* The importer must refuse a page-corrupted artifact instead of installing
+ * it as the live cache DB (where every row scan silently truncates). */
+TEST(artifact_import_refuses_corrupt_db) {
+    setup_artifact_test();
+    create_and_corrupt_db(g_db);
+
+    /* Compress the corrupt DB bytes directly (the export path itself now
+     * refuses corrupt sources, so forge the artifact by hand). */
+    size_t raw_size = 0;
+    char *raw = NULL;
+    {
+        FILE *fp = fopen(g_db, "rb");
+        ASSERT_NOT_NULL(fp);
+        fseek(fp, 0, SEEK_END);
+        raw_size = (size_t)ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+        raw = malloc(raw_size);
+        ASSERT_EQ(fread(raw, 1, raw_size, fp), raw_size);
+        fclose(fp);
+    }
+    size_t bound = cbm_zstd_compress_bound((int)raw_size);
+    char *compressed = malloc(bound);
+    int clen = cbm_zstd_compress(raw, (int)raw_size, compressed, (int)bound, 3);
+    free(raw);
+    ASSERT_GT(clen, 0);
+
+    char art_dir[1024];
+    snprintf(art_dir, sizeof(art_dir), "%s/.codebase-memory", g_repo);
+    cbm_mkdir_p(art_dir, 0755);
+    char zst[1024];
+    snprintf(zst, sizeof(zst), "%s/graph.db.zst", art_dir);
+    FILE *zf = fopen(zst, "wb");
+    ASSERT_NOT_NULL(zf);
+    fwrite(compressed, 1, (size_t)clen, zf);
+    fclose(zf);
+    free(compressed);
+
+    char meta[1024];
+    snprintf(meta, sizeof(meta), "%s/artifact.json", art_dir);
+    char meta_json[256];
+    snprintf(meta_json, sizeof(meta_json),
+             "{\"schema_version\": 1, \"project\": \"test-proj\", \"original_size\": %zu}",
+             raw_size);
+    write_text_file(meta, meta_json);
+
+    char import_db[1024];
+    snprintf(import_db, sizeof(import_db), "%s/imported.db", g_tmpdir);
+    ASSERT_NEQ(cbm_artifact_import(g_repo, import_db), 0);
+
+    /* The corrupt DB must NOT have been installed. */
+    struct stat st;
+    ASSERT_NEQ(stat(import_db, &st), 0);
+
+    cleanup_dir(g_tmpdir);
+    PASS();
+}
+
+/* VACUUM INTO reads every row, so exporting a page-corrupted DB must fail
+ * loudly instead of publishing a broken artifact for teammates. */
+TEST(artifact_export_refuses_corrupt_source) {
+    setup_artifact_test();
+    create_and_corrupt_db(g_db);
+
+    ASSERT_NEQ(cbm_artifact_export(g_db, g_repo, "test-proj", CBM_ARTIFACT_FAST), 0);
+    ASSERT_FALSE(cbm_artifact_exists(g_repo));
+
+    cleanup_dir(g_tmpdir);
+    PASS();
+}
+
 SUITE(artifact) {
     RUN_TEST(artifact_export_fast_roundtrip);
     RUN_TEST(artifact_export_best_roundtrip);
@@ -329,4 +489,7 @@ SUITE(artifact) {
     RUN_TEST(artifact_export_rename_failure_logs_specific_error);
     RUN_TEST(pipeline_persistence_export_failure_returns_error);
     RUN_TEST(artifact_null_safety);
+    RUN_TEST(artifact_export_fast_includes_hot_wal);
+    RUN_TEST(artifact_import_refuses_corrupt_db);
+    RUN_TEST(artifact_export_refuses_corrupt_source);
 }

@@ -1664,8 +1664,12 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
 /* Run the BM25 full-text search path and return the JSON result string.
  * Returns NULL if FTS5 is unavailable or the query produced no usable tokens,
  * in which case the caller falls back to the regex-based search path. */
+/* out_err: set to a heap-allocated message (caller frees) when the search
+ * failed in a way that must NOT fall through to the regex path — e.g. the
+ * FTS scan died on a corrupted page. NULL on success / benign fallthrough. */
 static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
-                         const char *file_pattern, int limit, int offset) {
+                         const char *file_pattern, int limit, int offset, char **out_err) {
+    *out_err = NULL;
     sqlite3 *db = cbm_store_get_db(store);
     if (!db) {
         return NULL;
@@ -1769,7 +1773,8 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
 
     yyjson_mut_val *results = yyjson_mut_arr(doc);
     int emitted = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    int src;
+    while ((src = sqlite3_step(stmt)) == SQLITE_ROW) {
         yyjson_mut_val *item = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_strcpy(doc, item, "name",
                                   (const char *)sqlite3_column_text(stmt, BM25_COL_NAME));
@@ -1784,6 +1789,20 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         yyjson_mut_obj_add_real(doc, item, "rank", sqlite3_column_double(stmt, BM25_COL_RANK));
         yyjson_mut_arr_add_val(results, item);
         emitted++;
+    }
+    if (src != SQLITE_DONE) {
+        /* Scan died mid-way (a corrupted nodes_fts shadow tree used to show
+         * up here as an innocent-looking {"total":0,"results":[]}). */
+        char errbuf[MCP_FIELD_SIZE];
+        snprintf(errbuf, sizeof(errbuf),
+                 "full-text search failed: %s — the project database may be corrupted; run "
+                 "index_repository to rebuild it",
+                 sqlite3_errmsg(db));
+        *out_err = heap_strdup(errbuf);
+        sqlite3_finalize(stmt);
+        free(file_like);
+        yyjson_mut_doc_free(doc);
+        return NULL;
     }
     sqlite3_finalize(stmt);
     free(file_like);
@@ -1928,8 +1947,17 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         int q_limit = cbm_mcp_get_int_arg(args, "limit", BM25_DEFAULT_LIMIT);
         int q_offset = cbm_mcp_get_int_arg(args, "offset", 0);
         char *q_file_pattern = cbm_mcp_get_string_arg(args, "file_pattern");
-        char *bm25_json = bm25_search(store, project, query, q_file_pattern, q_limit, q_offset);
+        char *bm25_err = NULL;
+        char *bm25_json =
+            bm25_search(store, project, query, q_file_pattern, q_limit, q_offset, &bm25_err);
         free(q_file_pattern);
+        if (bm25_err) {
+            free(query);
+            free(project);
+            char *result = cbm_mcp_text_result(bm25_err, true);
+            free(bm25_err);
+            return result;
+        }
         if (bm25_json) {
             free(query);
             free(project);
@@ -1978,7 +2006,23 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     };
 
     cbm_search_output_t out = {0};
-    cbm_store_search(store, &params, &out);
+    if (cbm_store_search(store, &params, &out) != CBM_STORE_OK) {
+        /* Without this check a scan that died mid-way (e.g. SQLITE_CORRUPT)
+         * was serialized as {"total": N, "results": []} — a silent lie. */
+        char errbuf[MCP_FIELD_SIZE];
+        snprintf(errbuf, sizeof(errbuf),
+                 "graph search failed: %s — the project database may be corrupted; run "
+                 "index_repository to rebuild it",
+                 cbm_store_error(store));
+        cbm_store_search_free(&out);
+        free(project);
+        free(label);
+        free(name_pattern);
+        free(qn_pattern);
+        free(file_pattern);
+        free(relationship);
+        return cbm_mcp_text_result(errbuf, true);
+    }
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -2400,7 +2444,21 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     /* Counts-only: this handler renders label/type counts but never property
      * keys, and full key discovery json_each-scans every row (seconds-to-
      * minutes on multi-million-node graphs). */
-    cbm_store_get_schema_counts_scoped(store, project, scope_path, &schema);
+    if (cbm_store_get_schema_counts_scoped(store, project, scope_path, &schema) == CBM_STORE_ERR) {
+        /* Distinguish a failed scan from a genuinely empty scope — a corrupt
+         * DB used to render as node_labels:[] next to a non-zero total. */
+        char errbuf[MCP_FIELD_SIZE];
+        snprintf(errbuf, sizeof(errbuf),
+                 "architecture scan failed: %s — the project database may be corrupted; run "
+                 "index_repository to rebuild it",
+                 cbm_store_error(store));
+        free(project);
+        free(scope_path);
+        if (aspects_doc) {
+            yyjson_doc_free(aspects_doc);
+        }
+        return cbm_mcp_text_result(errbuf, true);
+    }
 
     cbm_architecture_info_t arch = {0};
     cbm_store_get_architecture(store, project, scope_path,
