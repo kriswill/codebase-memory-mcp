@@ -1022,6 +1022,62 @@ TEST(cypher_exec_unknown_func_return_errors) {
     PASS();
 }
 
+/* A list subscript after a recognised function call — labels(n)[0] — used to
+ * be silently dropped along with EVERYTHING after it (here: the second return
+ * column AND the LIMIT), yielding a one-column, unlimited result that looked
+ * valid. It must be a parse error, never a silent partial result. */
+TEST(cypher_exec_list_subscript_errors) {
+    cbm_store_t *s = setup_cypher_store();
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (n:Function) RETURN labels(n)[0], n.name LIMIT 5", "test", 0, &r);
+    ASSERT_TRUE(rc != 0);
+    ASSERT_NOT_NULL(r.error);
+    ASSERT_TRUE(strstr(r.error, "not supported") != NULL);
+    cbm_cypher_result_free(&r);
+
+    /* Control: the same query without the subscript works fully — both
+     * columns projected and the LIMIT honoured. */
+    cbm_cypher_result_t r2 = {0};
+    rc = cbm_cypher_execute(s, "MATCH (n:Function) RETURN labels(n), n.name LIMIT 2", "test", 0,
+                            &r2);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r2.col_count, 2);
+    ASSERT_EQ(r2.row_count, 2);
+    cbm_cypher_result_free(&r2);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Trailing tokens the parser cannot consume must be a parse error, not
+ * silently ignored (a dropped tail turns typos into wrong-but-plausible
+ * results). */
+TEST(cypher_parse_trailing_tokens_error) {
+    cbm_query_t *q = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse("MATCH (f:Function) RETURN f.name LIMIT 2 bogus trailing", &q, &err);
+    ASSERT_EQ(rc, -1);
+    ASSERT_NOT_NULL(err);
+    ASSERT_TRUE(strstr(err, "bogus") != NULL);
+    free(err);
+    PASS();
+}
+
+/* An unsupported write clause AFTER the RETURN used to be silently ignored;
+ * it must now surface the same named error as a leading one. */
+TEST(cypher_parse_trailing_unsupported_clause_error) {
+    cbm_query_t *q = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse("MATCH (n:Function) RETURN n.name SET n.flag = \"y\"", &q, &err);
+    ASSERT_EQ(rc, -1);
+    ASSERT_NOT_NULL(err);
+    ASSERT_TRUE(strstr(err, "SET") != NULL);
+    free(err);
+    PASS();
+}
+
 /* issue #242: openCypher label alternation in MATCH — (n:A|B). */
 TEST(cypher_exec_label_alternation_issue242) {
     cbm_store_t *s = setup_cypher_store();
@@ -2592,6 +2648,9 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_count_distinct_issue239);
     RUN_TEST(cypher_exec_unsupported_func_errors_issue373);
     RUN_TEST(cypher_exec_unknown_func_return_errors);
+    RUN_TEST(cypher_exec_list_subscript_errors);
+    RUN_TEST(cypher_parse_trailing_tokens_error);
+    RUN_TEST(cypher_parse_trailing_unsupported_clause_error);
     RUN_TEST(cypher_exec_inline_props);
     RUN_TEST(cypher_parse_where_starts_with);
     RUN_TEST(cypher_parse_where_contains);
