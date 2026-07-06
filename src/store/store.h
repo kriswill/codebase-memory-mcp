@@ -228,6 +228,11 @@ struct sqlite3 *cbm_store_get_db(cbm_store_t *s);
 /* Get the last error message (static string, valid until next call). */
 const char *cbm_store_error(cbm_store_t *s);
 
+/* Monotonic count of errors recorded on this store handle. Snapshot before a
+ * batch of store calls and compare after to detect that ANY of them failed
+ * (e.g. a SQLITE_CORRUPT mid-scan) without checking every return code. */
+int cbm_store_error_generation(cbm_store_t *s);
+
 /* ── Transaction ────────────────────────────────────────────────── */
 
 /* Begin a transaction. Returns CBM_STORE_OK on success. */
