@@ -35,17 +35,19 @@
         {
           inherit codebase-memory-mcp;
           default = codebase-memory-mcp;
-        }
-        # cbm-tools (cbm-ctl / cbm-daemon launchd supervision) is macOS-only.
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          cbm-tools = pkgs.callPackage ./nix/darwin/tools/package.nix { inherit codebase-memory-mcp; };
+          # cbm-tools: cbm-ctl / cbm-daemon supervision helpers (launchd user
+          # agent on macOS, systemd user service on Linux).
+          cbm-tools = pkgs.callPackage ./nix/tools/package.nix { inherit codebase-memory-mcp; };
         }
       );
 
-      # nix-darwin module supervising the daemon under launchd (parameterized over
-      # `self` so package/tools default to this flake's builds — no overlay needed).
+      # nix-darwin / NixOS modules supervising the daemon (launchd user agent /
+      # systemd user service; parameterized over `self` so package/tools default
+      # to this flake's builds — no overlay needed).
       darwinModules.codebase-memory-mcp = import ./nix/darwin/module.nix self;
       darwinModules.default = self.darwinModules.codebase-memory-mcp;
+      nixosModules.codebase-memory-mcp = import ./nix/nixos/module.nix self;
+      nixosModules.default = self.nixosModules.codebase-memory-mcp;
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.callPackage ./nix/devshell.nix {

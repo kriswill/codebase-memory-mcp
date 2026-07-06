@@ -1,12 +1,13 @@
 /*
- * cbm-ctl — control CLI for the launchd-supervised codebase-memory-mcp daemon.
+ * cbm-ctl — control CLI for the supervised codebase-memory-mcp daemon
+ * (launchd user agent on macOS, systemd user service on Linux).
  *
  * Subcommands:
- *   status              launchctl state + port listener + indexed projects
+ *   status              daemon state + port listener + indexed projects
  *   flush  [path]       persist the index artifact for a repo (heavy reindex)
  *   commit [-m msg][path]  flush, then git add/commit .codebase-memory
- *   start | stop | restart  launchctl kickstart / bootout the user agent
- *   logs                tail -F the daemon's stdout/stderr logs
+ *   start | stop | restart  drive the user agent / user service
+ *   logs                follow the daemon's logs
  *
  * flush/commit hold a process-wide advisory lock (mkdir-atomic) so concurrent
  * sessions serialize heavy persist work instead of piling on N reindexes at
@@ -14,7 +15,7 @@
  * busy_timeout) and is never held across the daemon's own watcher writes.
  *
  * Tool paths are baked at build time via -D macros (no PATH reliance):
- *   CBM_BIN, GIT, LAUNCHCTL, LSOF, TAIL
+ *   CBM_BIN, GIT, LSOF; macOS: LAUNCHCTL, TAIL; Linux: SYSTEMCTL, JOURNALCTL
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -35,20 +36,33 @@
 #ifndef GIT
 #define GIT "git"
 #endif
-#ifndef LAUNCHCTL
-#define LAUNCHCTL "/bin/launchctl"
-#endif
 #ifndef LSOF
 #define LSOF "/usr/sbin/lsof"
+#endif
+
+#ifdef __APPLE__
+#ifndef LAUNCHCTL
+#define LAUNCHCTL "/bin/launchctl"
 #endif
 #ifndef TAIL
 #define TAIL "/usr/bin/tail"
 #endif
-
 /* nix-darwin registers `launchd.user.agents.<name>` under the label
  * org.nixos.<name> (e.g. the repo's org.nixos.claude-config-dir). This must
  * match the agent name in darwin/module.nix and its StandardOut/ErrorPath. */
 #define LABEL "org.nixos.codebase-memory-mcp"
+#define SUPERVISOR "launchd user agent"
+#else
+#ifndef SYSTEMCTL
+#define SYSTEMCTL "systemctl"
+#endif
+#ifndef JOURNALCTL
+#define JOURNALCTL "journalctl"
+#endif
+/* Must match `systemd.user.services.<name>` in nixos/module.nix. */
+#define UNIT "codebase-memory-mcp.service"
+#define SUPERVISOR "systemd user service"
+#endif
 #define PORT_DEFAULT "9749"
 #define LOCK_TTL_SECS (30 * 60)
 #define LOCK_WAIT_SECS 120
@@ -345,6 +359,7 @@ static void section(const char *name) {
     printf("  %s%s%s%s:\n", COL(A_BOLD), COL(A_BLUE), name, COL(A_RESET));
 }
 
+#ifdef __APPLE__
 /* In a `launchctl list` plist dump, find the text after `"key" = `. */
 static const char *plist_after(const char *buf, const char *key) {
     char needle[160];
@@ -373,6 +388,34 @@ static int plist_str(const char *buf, const char *key, char *out, size_t n) {
     out[i] = '\0';
     return 0;
 }
+#else
+/* In `systemctl show` output ("Key=Value" lines), copy the value for `key`. */
+static int kv_str(const char *buf, const char *key, char *out, size_t n) {
+    char needle[160];
+    snprintf(needle, sizeof needle, "%s=", key);
+    const char *p = NULL;
+    if (strncmp(buf, needle, strlen(needle)) == 0) {
+        p = buf;
+    } else {
+        char nl[164];
+        snprintf(nl, sizeof nl, "\n%s=", key);
+        p = strstr(buf, nl);
+        if (p) {
+            p++;
+        }
+    }
+    if (!p) {
+        return -1;
+    }
+    p += strlen(needle);
+    size_t i = 0;
+    while (*p && *p != '\n' && i + 1 < n) {
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return 0;
+}
+#endif
 
 /* Extract "key":"string" / "key":number from a flat JSON object substring. */
 static int json_str(const char *obj, const char *key, char *out, size_t n) {
@@ -415,18 +458,23 @@ static void human_size(long bytes, char *out, size_t n) {
     snprintf(out, n, "%.1f %s", b, u[i]);
 }
 
-static int cmd_status(void) {
-    g_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    const char *port = getenv("CBM_PORT");
-    if (!port || !*port) {
-        port = PORT_DEFAULT;
-    }
+/* Shared "port" row: lsof for a listener on the UI port. */
+static void port_field(const char *port) {
+    char iarg[64];
+    char lpid[64] = "";
+    char buf[128];
+    snprintf(iarg, sizeof iarg, "-iTCP:%s", port);
+    char *ls[] = {(char *)LSOF, "-nP", iarg, "-sTCP:LISTEN", "-t", NULL};
+    bool listening = (capture(ls, lpid, sizeof lpid) == 0 && lpid[0] != '\0');
+    snprintf(buf, sizeof buf, "%s  %s", port, listening ? "listening" : "not listening");
+    field(4, "port", listening ? A_GREEN : A_YELLOW, buf);
+}
+
+#ifdef __APPLE__
+/* ── daemon section: parsed from `launchctl list <LABEL>` ── */
+static void status_daemon(const char *port) {
     const char *home = getenv("HOME");
     char buf[1200];
-
-    printf("%s%scodebase-memory-mcp%s\n", COL(A_BOLD), COL(A_BLUE), COL(A_RESET));
-
-    /* ── daemon: parsed from `launchctl list <LABEL>` ── */
     section("daemon");
     char plist[8192];
     char *ll[] = {(char *)LAUNCHCTL, "list", (char *)LABEL, NULL};
@@ -447,13 +495,7 @@ static int cmd_status(void) {
         field(4, "pid", A_YELLOW, buf);
     }
 
-    char iarg[64];
-    snprintf(iarg, sizeof iarg, "-iTCP:%s", port);
-    char lpid[64] = "";
-    char *ls[] = {(char *)LSOF, "-nP", iarg, "-sTCP:LISTEN", "-t", NULL};
-    bool listening = (capture(ls, lpid, sizeof lpid) == 0 && lpid[0] != '\0');
-    snprintf(buf, sizeof buf, "%s  %s", port, listening ? "listening" : "not listening");
-    field(4, "port", listening ? A_GREEN : A_YELLOW, buf);
+    port_field(port);
 
     if (loaded && lastexit >= 0) {
         snprintf(buf, sizeof buf, "%ld", lastexit);
@@ -466,6 +508,64 @@ static int cmd_status(void) {
         snprintf(buf, sizeof buf, "%s/Library/Logs/%s.{out,err}.log", home, LABEL);
         field(4, "logs", A_DIM, buf);
     }
+}
+#else
+/* ── daemon section: parsed from `systemctl --user show <UNIT>` ── */
+static void status_daemon(const char *port) {
+    char buf[1200];
+    section("daemon");
+    char show[8192];
+    char *sc[] = {(char *)SYSTEMCTL,
+                  "--user",
+                  "show",
+                  UNIT,
+                  "--property=LoadState,ActiveState,SubState,MainPID,ExecMainStatus,FragmentPath",
+                  NULL};
+    char loadstate[64] = "";
+    char active[64] = "";
+    char pidstr[32] = "";
+    char lastexit[32] = "";
+    char unitfile[1024] = "";
+    bool loaded = (capture(sc, show, sizeof show) == 0 &&
+                   kv_str(show, "LoadState", loadstate, sizeof loadstate) == 0 &&
+                   strcmp(loadstate, "loaded") == 0);
+    if (loaded) {
+        (void)kv_str(show, "ActiveState", active, sizeof active);
+        (void)kv_str(show, "MainPID", pidstr, sizeof pidstr);
+        (void)kv_str(show, "ExecMainStatus", lastexit, sizeof lastexit);
+        (void)kv_str(show, "FragmentPath", unitfile, sizeof unitfile);
+    }
+    bool running = loaded && strcmp(active, "active") == 0;
+    field(4, "status", running ? A_GREEN : A_RED,
+          !loaded ? "not loaded" : (running ? "running" : (active[0] ? active : "stopped")));
+    if (running && pidstr[0] && strcmp(pidstr, "0") != 0) {
+        field(4, "pid", A_YELLOW, pidstr);
+    }
+
+    port_field(port);
+
+    if (loaded && !running && lastexit[0]) {
+        field(4, "last exit", strcmp(lastexit, "0") == 0 ? A_GREEN : A_YELLOW, lastexit);
+    }
+    if (unitfile[0]) {
+        field(4, "unit", A_DIM, unitfile);
+    }
+    snprintf(buf, sizeof buf, "journalctl --user -u %s", UNIT);
+    field(4, "logs", A_DIM, buf);
+}
+#endif
+
+static int cmd_status(void) {
+    g_color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
+    const char *port = getenv("CBM_PORT");
+    if (!port || !*port) {
+        port = PORT_DEFAULT;
+    }
+    char buf[1200];
+
+    printf("%s%scodebase-memory-mcp%s\n", COL(A_BOLD), COL(A_BLUE), COL(A_RESET));
+
+    status_daemon(port);
 
     /* ── projects: parsed from `cli list_projects` JSON ── */
     section("projects");
@@ -526,6 +626,7 @@ static int cmd_status(void) {
     return 0;
 }
 
+#ifdef __APPLE__
 static int launchctl_job(const char *verb, bool dash_k) {
     char target[256];
     snprintf(target, sizeof target, "gui/%u/%s", (unsigned)getuid(), LABEL);
@@ -554,6 +655,14 @@ static int cmd_start(void) {
     return run(argv);
 }
 
+static int cmd_stop(void) {
+    return launchctl_job("bootout", false);
+}
+
+static int cmd_restart(void) {
+    return launchctl_job("kickstart", true);
+}
+
 static int cmd_logs(void) {
     const char *home = getenv("HOME");
     if (!home) {
@@ -568,6 +677,31 @@ static int cmd_logs(void) {
     fprintf(stderr, "%s: exec tail: %s\n", prog, strerror(errno));
     return 127;
 }
+#else
+static int systemctl_user(const char *verb) {
+    char *argv[] = {(char *)SYSTEMCTL, "--user", (char *)verb, UNIT, NULL};
+    return run(argv);
+}
+
+static int cmd_start(void) {
+    return systemctl_user("start");
+}
+
+static int cmd_stop(void) {
+    return systemctl_user("stop");
+}
+
+static int cmd_restart(void) {
+    return systemctl_user("restart");
+}
+
+static int cmd_logs(void) {
+    char *argv[] = {(char *)JOURNALCTL, "--user", "-u", UNIT, "-n", "200", "-f", NULL};
+    execvp(argv[0], argv);
+    fprintf(stderr, "%s: exec journalctl: %s\n", prog, strerror(errno));
+    return 127;
+}
+#endif
 
 /* One usage row: cyan command, dim args, description aligned at column 24. */
 static void usage_row(const char *cmd, const char *args, const char *desc) {
@@ -589,11 +723,11 @@ static void usage(void) {
     fprintf(stderr, "%s%scbm-ctl%s %s— control the codebase-memory-mcp daemon%s\n\n", COL(A_BOLD),
             COL(A_BLUE), COL(A_RESET), COL(A_DIM), COL(A_RESET));
     fprintf(stderr, "%susage:%s cbm-ctl <command>\n\n", COL(A_DIM), COL(A_RESET));
-    usage_row("status", "", "launchd state, port listener, indexed projects");
+    usage_row("status", "", "daemon state, port listener, indexed projects");
     usage_row("flush", "[path]", "persist the index artifact for a repo");
     usage_row("commit", "[-m msg] [path]", "flush, then git add/commit .codebase-memory");
-    usage_row("start | stop | restart", "", "control the launchd user agent");
-    usage_row("logs", "", "tail -F the daemon logs");
+    usage_row("start | stop | restart", "", "control the " SUPERVISOR);
+    usage_row("logs", "", "follow the daemon logs");
 }
 
 int main(int argc, char **argv) {
@@ -612,13 +746,13 @@ int main(int argc, char **argv) {
         return cmd_commit(argc - 2, argv + 2);
     }
     if (strcmp(cmd, "restart") == 0) {
-        return launchctl_job("kickstart", true);
+        return cmd_restart();
     }
     if (strcmp(cmd, "start") == 0) {
         return cmd_start();
     }
     if (strcmp(cmd, "stop") == 0) {
-        return launchctl_job("bootout", false);
+        return cmd_stop();
     }
     if (strcmp(cmd, "logs") == 0) {
         return cmd_logs();

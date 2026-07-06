@@ -29,10 +29,13 @@ stdenv.mkDerivation {
 
   # Neutralize the npm-driven `frontend` Makefile target — the sandbox has no
   # network, so we supply graph-ui's prebuilt dist instead (see buildPhase).
-  # The `embed` step still runs on that dist (pure shell + cc).
+  # The `embed` step still runs on that dist (pure shell + cc). patchShebangs:
+  # the Linux sandbox has no /usr/bin/env for the scripts' shebangs (the darwin
+  # sandbox exposes /usr/bin, which is why this was never needed there).
   postPatch = ''
     substituteInPlace Makefile.cbm \
       --replace-fail 'cd graph-ui && npm ci && npm run build' 'true'
+    patchShebangs scripts/
   '';
 
   # Drop the prebuilt frontend into graph-ui/dist first; inject the real version

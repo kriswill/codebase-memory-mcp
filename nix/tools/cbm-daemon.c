@@ -1,18 +1,20 @@
 /*
- * cbm-daemon — launchd-friendly foreground wrapper for codebase-memory-mcp's
- * HTTP UI / watcher daemon.
+ * cbm-daemon — supervisor-friendly foreground wrapper for codebase-memory-mcp's
+ * HTTP UI / watcher daemon (launchd user agent on macOS, systemd user service
+ * on Linux).
  *
  * Why this exists: `codebase-memory-mcp` has no daemon mode. Its HTTP UI and
  * git-watcher run as background threads inside the normal stdio MCP server,
  * which blocks in cbm_mcp_server_run() until stdin hits EOF (or SIGTERM). Under
- * launchd, stdin is /dev/null, so the process would read EOF and exit at once.
+ * launchd/systemd, stdin is /dev/null, so the process would read EOF and exit
+ * at once.
  *
  * The fix is to hand the server a stdin that never reaches EOF: a FIFO opened
  * O_RDWR (this process is therefore also a writer, so reads block forever). We
- * dup2 it onto fd 0 and exec the server in the foreground, so launchd tracks
- * the real daemon PID directly — KeepAlive restarts it on crash, and a SIGTERM
- * from `launchctl bootout` / `kickstart -k` reaches the server's own graceful
- * signal handler.
+ * dup2 it onto fd 0 and exec the server in the foreground, so the supervisor
+ * tracks the real daemon PID directly — KeepAlive / Restart=always restarts it
+ * on crash, and a SIGTERM from `launchctl bootout` / `systemctl --user stop`
+ * reaches the server's own graceful signal handler.
  *
  * Config (env, with compiled-in fallbacks):
  *   CBM_BIN         path to codebase-memory-mcp   (default: -DCBM_BIN_DEFAULT)
