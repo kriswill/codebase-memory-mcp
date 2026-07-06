@@ -257,24 +257,11 @@ static int resolve_root(const char *arg, char *root, size_t n) {
     return -1;
 }
 
-static void json_escape(const char *s, char *out, size_t n) {
-    size_t j = 0;
-    for (size_t i = 0; s[i] && j + 2 < n; i++) {
-        if (s[i] == '"' || s[i] == '\\') {
-            out[j++] = '\\';
-        }
-        out[j++] = s[i];
-    }
-    out[j] = '\0';
-}
-
 static int do_flush(const char *root) {
-    char esc[4096];
-    json_escape(root, esc, sizeof esc);
-    char json[4200];
-    snprintf(json, sizeof json, "{\"repo_path\":\"%s\",\"persistence\":true}", esc);
     fprintf(stderr, "%s: flushing index for %s ...\n", prog, root);
-    char *argv[] = {(char *)CBM_BIN, "cli", "index_repository", json, NULL};
+    /* Flag form — the raw-JSON positional arg is deprecated upstream. */
+    char *argv[] = {(char *)CBM_BIN, "cli",           "index_repository", "--repo-path",
+                    (char *)root,    "--persistence", "true",             NULL};
     return run(argv);
 }
 
