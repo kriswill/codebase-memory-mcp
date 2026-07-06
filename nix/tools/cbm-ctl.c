@@ -576,15 +576,28 @@ static int cmd_status(void) {
         return 0;
     }
     const char *p = strchr(json, '[');           /* skips any leading log line */
-    const char *end = p ? strchr(p, ']') : NULL; /* flat objects → first ] ends array */
+    const char *end = p ? strchr(p, ']') : NULL; /* no nested arrays → first ] ends array */
     int count = 0;
     while (p && end) {
         const char *ob = strchr(p, '{');
         if (!ob || ob > end) {
             break;
         }
-        const char *oe = strchr(ob, '}');
-        if (!oe || oe > end) {
+        /* Match the object's own closing brace — projects nest a git:{...}
+         * object, so the first '}' is NOT the end. (Depth counter; brace
+         * characters inside quoted strings would miscount, but keys/paths
+         * here never contain them.) */
+        const char *oe = NULL;
+        int depth = 0;
+        for (const char *q = ob; *q; q++) {
+            if (*q == '{') {
+                depth++;
+            } else if (*q == '}' && --depth == 0) {
+                oe = q;
+                break;
+            }
+        }
+        if (!oe) {
             break;
         }
         char obj[2048];
