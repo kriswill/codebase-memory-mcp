@@ -25,7 +25,7 @@ stdenv.mkDerivation {
     git
     makeWrapper
   ];
-  buildInputs = [ zlib ] ++ lib.optionals stdenv.isLinux [ zlib.static ];
+  buildInputs = [ zlib ] ++ lib.optionals stdenv.hostPlatform.isLinux [ zlib.static ];
 
   # Neutralize the npm-driven `frontend` Makefile target — the sandbox has no
   # network, so we supply graph-ui's prebuilt dist instead (see buildPhase).
